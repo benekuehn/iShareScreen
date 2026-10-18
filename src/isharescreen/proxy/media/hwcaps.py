@@ -1,9 +1,8 @@
 """GPU capability probe for HEVC 4:4:4 hardware decode + codec auto-selection.
 
-Apple's screen-share default video codec is HEVC RExt 4:4:4, which only recent
-GPUs hardware-decode (AMD RDNA3+, Intel Arc / 12th-gen+, NVIDIA Ada+); on the
-rest, libav silently falls back to CPU decode, which is far too slow for a live
-4-tile stream. H.264 4:2:0 (the AVC codec bank, see offers.py) hardware-decodes
+Apple's screen-share default video codec is HEVC RExt 4:4:4. Support depends
+on both the GPU and FFmpeg build (including Intel Gen11 VAAPI); a requested
+backend can silently fall back to CPU decode. H.264 4:2:0 hardware-decodes
 on virtually every GPU (D3D11VA on Windows, VAAPI on Linux, VideoToolbox on
 macOS). `--codec auto` (the default) resolves to HEVC 4:4:4 when the GPU can
 hardware-decode it and to H.264 4:2:0 otherwise.
@@ -20,6 +19,8 @@ from __future__ import annotations
 import logging
 import os
 import sys
+
+from .hardware import hardware_active
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def _probe_one(hwaccel_type: str) -> bool:
         ctx = av.CodecContext.create("hevc", "r", hwaccel=hw)
         frames = list(ctx.decode(av.Packet(_HEVC444_SAMPLE)))
         frames += list(ctx.decode(None))  # flush
-        ok = bool(frames)
+        ok = bool(frames) and hardware_active(ctx, frames[0])
         log.info("hevc444 probe (%s): %s%s", hwaccel_type,
                  "HW-decoded" if ok else "no HW frame",
                  (" (fmt=%s)" % frames[0].format.name) if frames else "")

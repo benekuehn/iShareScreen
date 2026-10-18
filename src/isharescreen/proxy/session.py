@@ -56,7 +56,7 @@ from .protocol.negotiation import (
     NegotiationResult,
     connect_and_negotiate,
 )
-from .protocol.offers import extract_offer_ssrc, create_offers
+from .protocol.offers import extract_offer_ssrc, create_offers, tiles_per_frame
 from .protocol.rfb import warmup_tcp, parse_apple_display_layout, DisplayRect
 from .protocol.rtcp import (
     build_empty_sr,
@@ -382,6 +382,7 @@ class Session:
         self._audio_decryptor: Optional[SRTPDecryptor] = None
         self._audio_encryptor: Optional[SRTPEncryptor] = None
         self._srtcp_dec: Optional[SRTCPDecryptor] = None
+        self._audio_srtcp_dec: Optional[SRTCPDecryptor] = None
         self._srtcp_enc: Optional[SRTCPEncryptor] = None
         self._our_video_ssrc: Optional[int] = None
         self._our_audio_ssrc: Optional[int] = None
@@ -391,6 +392,7 @@ class Session:
         # on UDP 5900); the ctrl process loop demuxes by RTP payload-type byte.
         self._sock_ctrl: Optional[socket.socket] = None
         self._sock_video: Optional[socket.socket] = None
+        self._native_video_receiver = None
         # IPv4 address the host resolves to. The HP UDP transport (RTP/RTCP)
         # is IPv4-only, so TCP must land on the same IPv4 — resolved once in
         # _connect_internal. Defaults to the configured host until then.
@@ -515,6 +517,7 @@ class Session:
         # negotiation instead of advertising a capability AVC cannot complete.
         self._ltr_enabled = (
             self._video_codec == "hevc"
+            and tiles_per_frame() > 1
             and os.environ.get("ISS_LTRP", "1") != "0"
         )
         self._ltr_last_acked: int = 0
@@ -669,6 +672,11 @@ class Session:
         """Latest decoded frame for `tile_idx`, or None if no new frame
         since the last call (or the gate blocked the latest)."""
         if self._decoder is None:
+            return None
+        # TCP geometry can change before new video parameters arrive. Never
+        # hand the old codec's surfaces to the new-size renderer in that gap.
+        if (getattr(self, "_needs_param_harvest", False)
+                or getattr(self, "_avc_needs_reconfig", False)):
             return None
         if not 0 <= tile_idx < self.num_tiles:
             raise ValueError(
@@ -1028,6 +1036,10 @@ class Session:
         bind_host = cfg.udp_bind_host or os.environ.get("ISS_UDP_BIND_HOST", "")
         self._sock_ctrl = self._bind_udp(bind_host, ctrl_port)
         self._sock_video = self._bind_udp(bind_host, video_port)
+        if os.environ.get("ISS_NATIVE_GPU") == "1" and self._recorder is None:
+            from .media.native import NativeUdpReceiver
+            self._native_video_receiver = NativeUdpReceiver(self._sock_video.fileno())
+            log.info("video UDP: native Rust receive buffer active (16384 packets / 32 MiB limit)")
         # Tap the media sockets so SRTP RTP/RTCP (and our heartbeats /
         # firewall punches) land in the capture alongside the TCP control
         # stream. The tap is a transparent proxy — every other socket call
@@ -1118,6 +1130,7 @@ class Session:
             punch_stop.set()
             punch_thr.join(timeout=1.0)
         self._ssrc_to_tile = dict(burst.ssrc_to_tile)
+        self._hevc_has_donl = burst.has_donl
         self._pending_groups = burst.burst_pending
         self._group_arrival = {key: time.monotonic() for key in burst.burst_pending}
 
@@ -1336,14 +1349,10 @@ class Session:
         """Negotiate + gather the start burst, re-handshaking from scratch on
         a starved burst.
 
-        By here the control path is pinned to IPv4 (see _resolve_host_ipv4),
-        so a starved burst is genuinely host-side: screensharingd accepted
-        the canvas over TCP but its agent never started sending RTP. An
-        in-session re-poke can't unstick that -- the wedge lives in the
-        host-side ScreensharingAgent. The reliable recovery is a fresh
-        handshake: closing the TCP drops the wedged agent so a clean one
-        spawns (the manual "just run it again" fix, automated). Only after
-        `_BURST_RETRY_ATTEMPTS` do we surface an error."""
+        A fresh handshake can recover a silent host agent or a lost startup
+        burst. Missing parameter sets despite received packets can also mean
+        a depacketization problem; do not diagnose that as a silent host.
+        Only after `_BURST_RETRY_ATTEMPTS` do we surface an error."""
         last_starved: Optional[BurstStarved] = None
         for attempt in range(_BURST_RETRY_ATTEMPTS):
             try:
@@ -1362,11 +1371,19 @@ class Session:
         cw = self._negotiation.canvas_width if self._negotiation else 0
         ch = self._negotiation.canvas_height if self._negotiation else 0
         pkts = last_starved.packets if last_starved else 0
+        if last_starved and last_starved.reason == "missing-param-sets":
+            raise RuntimeError(
+                f"HP stream could not initialize: {pkts} video packets arrived "
+                f"in the last of {_BURST_RETRY_ATTEMPTS} fresh handshakes for "
+                f"a {cw}x{ch} canvas, but the client could not extract codec "
+                "parameter sets. Check codec negotiation, packet loss and "
+                "RTP depacketization; this is not evidence of a silent host."
+            )
         raise RuntimeError(
-            f"HP stream never started: {pkts} HEVC video packets arrived across "
-            f"{_BURST_RETRY_ATTEMPTS} fresh handshakes. The host accepted a "
+            f"HP stream never started: {pkts} video packets arrived in the last "
+            f"of {_BURST_RETRY_ATTEMPTS} fresh handshakes. The host accepted a "
             f"{cw}x{ch} encoder canvas over IPv4, but screensharingd never sent "
-            f"any RTP -- a host-side stall. On the Mac, toggle Screen Sharing "
+            f"enough usable RTP for startup. On the Mac, toggle Screen Sharing "
             f"off/on in System Settings (clears a wedged agent), then reconnect; "
             f"--no-curtain (mirror the physical screen) can also help."
         )
@@ -1420,6 +1437,7 @@ class Session:
         self._video_decryptor = self._negotiation.video_decryptor
         self._audio_decryptor = SRTPDecryptor.from_blob(keys.audio_key_s)
         self._srtcp_dec = SRTCPDecryptor.from_blob(keys.video_key_s)
+        self._audio_srtcp_dec = SRTCPDecryptor.from_blob(keys.audio_key_s)
         self._srtcp_enc = SRTCPEncryptor.from_blob(keys.video_key_v)
         if self._our_audio_ssrc is not None:
             self._audio_encryptor = SRTPEncryptor.from_blob(
@@ -1437,8 +1455,20 @@ class Session:
         # are independent slice chains and the burst must gather enough to seed
         # the shared decoder context before the streaming loop starts.
         _is_avc = self._video_codec == "avc"
-        self._drain_socket_into(
-            self._sock_video, burst_buf, max_seconds=4.0 if _is_avc else 2.0)
+        receiver = self._native_video_receiver
+        if receiver is None:
+            self._drain_socket_into(
+                self._sock_video, burst_buf, max_seconds=4.0 if _is_avc else 2.0)
+        else:
+            deadline = time.monotonic() + (4.0 if _is_avc else 2.0)
+            last_packet = time.monotonic()
+            while time.monotonic() < deadline:
+                batch = receiver.batch()
+                if batch:
+                    burst_buf.extend(batch)
+                    last_packet = time.monotonic()
+                elif burst_buf and time.monotonic() - last_packet > 0.05:
+                    break
         return gather_initial_burst(
             burst_buf, self._video_decryptor, quality_tier=cfg.quality_tier,
             codec=self._video_codec,
@@ -1599,6 +1629,10 @@ class Session:
             self._aac.close()
             self._aac = None
 
+        receiver = getattr(self,"_native_video_receiver",None)
+        if receiver is not None:
+            receiver.close()
+            self._native_video_receiver = None
         for sock_attr in ("_sock_ctrl", "_sock_video"):
             sock = getattr(self, sock_attr, None)
             if sock is not None:
@@ -1640,6 +1674,7 @@ class Session:
         self._audio_decryptor = None
         self._audio_encryptor = None
         self._srtcp_dec = None
+        self._audio_srtcp_dec = None
         self._srtcp_enc = None
         self._ssrc_to_tile = {}
         self._pending_groups = {}
@@ -1683,6 +1718,8 @@ class Session:
         # rtcp-muxes audio onto _sock_ctrl (UDP 5900); the ctrl process
         # loop routes audio RTP to _handle_audio_rtp.
         for name, target in targets:
+            if name == "iss-video-drain" and self._native_video_receiver is not None:
+                continue  # Rust already drains; process batches directly.
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
@@ -2237,6 +2274,19 @@ class Session:
     # while the process thread does the heavier work in parallel.
 
     def _video_drain_loop(self) -> None:
+        for pkt in self._received_video_packets():
+            if pkt is None:
+                continue
+            try:
+                self._video_q.put_nowait(pkt)
+            except queue.Full:
+                self._video_q_dropped += 1
+
+    def _video_depth(self) -> int:
+        receiver = getattr(self,"_native_video_receiver",None)
+        return receiver.depth if receiver is not None else self._video_q.qsize()
+
+    def _received_video_packets(self):
         """Tight inner loop: recvfrom → enqueue. No processing here so
         the kernel UDP buffer empties as fast as the GIL allows. If the
         process thread falls behind and the queue fills, we drop at the
@@ -2257,8 +2307,9 @@ class Session:
         sock = self._sock_video
         if sock is None:
             return
-        sock.settimeout(_UDP_RECV_TIMEOUT_S)
-        q = self._video_q
+        receiver = self._native_video_receiver
+        if receiver is None:
+            sock.settimeout(_UDP_RECV_TIMEOUT_S)
         loss_count = 0
         # NAT diagnostic: track unique source addresses seen on this socket.
         # When iss runs behind a NAT, the host may send streams to the wrong
@@ -2266,9 +2317,25 @@ class Session:
         # source addresses we DO see (if any) reveals whether traffic is
         # arriving from an unexpected port (NAT translation evidence).
         src_seen: dict[tuple, int] = {}
+        native_batch = iter(())
+        native_drops = 0
         while not self._stop_evt.is_set():
             try:
-                pkt, _addr = sock.recvfrom(65536)
+                if receiver is None:
+                    pkt, _addr = sock.recvfrom(65536)
+                else:
+                    try:
+                        pkt=next(native_batch)
+                    except StopIteration:
+                        batch=receiver.batch()
+                        native_batch=iter(batch)
+                        dropped=receiver.dropped
+                        self._video_q_dropped+=dropped-native_drops
+                        native_drops=dropped
+                        if not batch:
+                            yield None
+                        continue
+                    _addr=None
             except socket.timeout:
                 continue
             except OSError:
@@ -2282,10 +2349,11 @@ class Session:
                     log.info("iss RTP RECV GAP %.0fms (bytes=%d)",
                              (_now - _last) * 1000, len(pkt))
                 self._prof_last_rx = _now
-            prev = src_seen.get(_addr, 0)
-            src_seen[_addr] = prev + 1
-            if prev == 0:
-                log.info("video UDP: first packet from src=%s:%d", _addr[0], _addr[1])
+            if _addr is not None:
+                prev = src_seen.get(_addr, 0)
+                src_seen[_addr] = prev + 1
+                if prev == 0:
+                    log.info("video UDP: first packet from src=%s:%d", _addr[0], _addr[1])
             if (drop_pct > 0
                     and time.monotonic() - loop_start > drop_after_s
                     and random.random() * 100 < drop_pct):
@@ -2307,23 +2375,32 @@ class Session:
                     if phase < 0.020:  # ~20 ms ≈ one frame at 60 fps
                         loss_count += 1
                         continue
-            try:
-                q.put_nowait(pkt)
-            except queue.Full:
-                self._video_q_dropped += 1
+            yield pkt
 
     def _video_process_loop(self) -> None:
         decryptor = self._video_decryptor
         if decryptor is None:
             return
         q = self._video_q
+        native_packets = self._received_video_packets() if self._native_video_receiver is not None else None
         while not self._stop_evt.is_set():
             try:
-                pkt = q.get(timeout=_UDP_RECV_TIMEOUT_S)
+                pkt = next(native_packets) if native_packets is not None else q.get(timeout=_UDP_RECV_TIMEOUT_S)
+                if pkt is None:
+                    self._evict_stale_groups()
+                    continue
+            except StopIteration:
+                return
             except queue.Empty:
                 self._evict_stale_groups()
                 continue
 
+            if self._is_rtcp_packet(pkt):
+                decrypted=self._srtcp_dec.unprotect(pkt) if self._srtcp_dec else None
+                if decrypted is not None:
+                    for source,ntp_mid32,arrival in parse_sr_arrivals(decrypted):
+                        self._server_sr[source]=(ntp_mid32,arrival)
+                continue
             res = decryptor.decrypt(pkt)
             if res is None:
                 continue
@@ -2344,6 +2421,11 @@ class Session:
             if now - self._last_group_evict_t >= 0.020:
                 self._last_group_evict_t = now
                 self._evict_stale_groups()
+
+    @staticmethod
+    def _is_rtcp_packet(pkt: bytes) -> bool:
+        return (len(pkt)>=4 and (pkt[0]&0xc0)==0x80
+                and 64 <= (pkt[1]&0x7f) <= 95)
 
     @staticmethod
     def _sorted_group_packets(grp: list[_PktTuple]) -> list[_PktTuple]:
@@ -2445,7 +2527,7 @@ class Session:
 
         if not any(p[1] for p in grp):
             return
-        if self._video_codec != "avc":
+        if self._video_codec != "avc" and getattr(self, "_hevc_has_donl", True):
             self._flush_group(key)
             return
 
@@ -2541,7 +2623,8 @@ class Session:
 
         # The access unit's DONL (decoding-order number) — the LTR ring key
         # the LTRP ack must echo. Same for every NALU in the group.
-        donl = first_donl(ordered) if self._ltr_enabled else None
+        has_donl = getattr(self, "_hevc_has_donl", True)
+        donl = first_donl(ordered, has_donl=has_donl) if self._ltr_enabled else None
         # AVC resize: the new geometry's avcC config (0x92) rides the new
         # stream out-of-band; re-root the decoder on it before decoding any
         # new-resolution slices (else: stale-sized context → -12909).
@@ -2559,7 +2642,7 @@ class Session:
         _reassemble = reassemble_h264 if self._video_codec == "avc" else reassemble_group
         au_cb = self._video_au_callback if self._video_codec == "avc" else None
 
-        nalus = list(_reassemble(ordered))
+        nalus = list(_reassemble(ordered)) if self._video_codec == "avc" else reassemble_group(ordered,has_donl=has_donl)
 
         # If a dynamic resolution change is in progress, harvest fresh
         # VPS/SPS/PPS from the new encoder's burst so the restarted
@@ -2731,7 +2814,7 @@ class Session:
             # internally complete AU establish a new transport anchor.
             self._last_group_marker_seq.pop(ssrc, None)
         ti = self._ssrc_to_tile.get(ssrc)
-        if self._video_codec == "avc" and ti is not None and self._decoder is not None:
+        if ti is not None and self._decoder is not None:
             trigger = (
                 f"RTP access unit incomplete after repair window ({reason}; "
                 f"packets={len(grp)} age={(now - started) * 1000:.1f}ms)"
@@ -3006,15 +3089,14 @@ class Session:
             except queue.Empty:
                 continue
             # Classify: RTP version-2 + non-RTCP PT = audio RTP packet.
-            if (
-                len(pkt) >= 2
-                and (pkt[0] & 0xC0) == 0x80
-                and not (200 <= (pkt[1] & 0x7F) <= 207)
-            ):
+            if not self._is_rtcp_packet(pkt):
                 self._handle_audio_rtp(pkt)
                 continue
             # Otherwise SRTCP.
-            decrypted = srtcp_dec.unprotect(pkt)
+            audio_dec = getattr(self,"_audio_srtcp_dec",None)
+            decrypted = audio_dec.unprotect(pkt) if audio_dec else None
+            if decrypted is None:
+                decrypted = srtcp_dec.unprotect(pkt)
             if decrypted is None:
                 continue
             for ssrc, ntp_mid32, arrival in parse_sr_arrivals(decrypted):
@@ -3756,7 +3838,7 @@ class Session:
             "loss_total": loss_total,
             "loss_unmapped": loss_unmapped,
             "udp_q": {
-                "video": {"depth": self._video_q.qsize(),
+                "video": {"depth": self._video_depth(),
                           "cap": _UDP_DRAIN_QUEUE_MAX,
                           "drop": self._video_q_dropped},
                 "ctrl":  {"depth": self._ctrl_q.qsize(),
@@ -3915,7 +3997,7 @@ class Session:
             loss_total, loss_unmapped,
             ssrc_groups,
             last_publish_age,
-            self._video_q.qsize(), _UDP_DRAIN_QUEUE_MAX, self._video_q_dropped,
+            self._video_depth(), _UDP_DRAIN_QUEUE_MAX, self._video_q_dropped,
             self._ctrl_q.qsize(), _UDP_DRAIN_QUEUE_MAX, self._ctrl_q_dropped,
             rx_v_pps, int(rx_v_mbps),
             rx_c_pps, rx_c_kbps,
@@ -3946,7 +4028,7 @@ class Session:
                 "ssrc_groups": ssrc_groups,
                 "last_publish_age_s": round(last_publish_age, 2),
                 "udp_q": {
-                    "video": {"depth": self._video_q.qsize(),
+                    "video": {"depth": self._video_depth(),
                               "cap": _UDP_DRAIN_QUEUE_MAX,
                               "drop": self._video_q_dropped},
                     "ctrl":  {"depth": self._ctrl_q.qsize(),
@@ -3992,8 +4074,13 @@ class Session:
         except OSError as e:
             log.debug("heartbeat send failed: %s", e)
 
+    def _video_feedback_transport(self):
+        if os.environ.get("ISS_VIDEO_RTCP_MUX") == "1":
+            return self._sock_video,self._video_dest_port
+        return self._sock_ctrl,self._ctrl_dest_port
+
     def _send_rr_and_maybe_sr(self) -> None:
-        sock = self._sock_ctrl
+        sock,port = self._video_feedback_transport()
         enc = self._srtcp_enc
         sender_ssrc = self._our_video_ssrc
         if sock is None or enc is None or sender_ssrc is None:
@@ -4012,7 +4099,7 @@ class Session:
             rr = build_empty_sr(sender_ssrc) + rr
 
         try:
-            sock.sendto(enc.protect(rr), (self._dest_host, self._ctrl_dest_port))
+            sock.sendto(enc.protect(rr), (self._dest_host, port))
         except OSError as e:
             log.debug("RR/SR send failed: %s", e)
 
@@ -4111,7 +4198,7 @@ class Session:
         if now - last < self._FIR_MIN_INTERVAL_S:
             return False
         self._last_fir_per_tile[tile_idx] = now
-        sock = self._sock_ctrl
+        sock,port = self._video_feedback_transport()
         enc = self._srtcp_enc
         if sock is None or enc is None:
             return False
@@ -4127,7 +4214,7 @@ class Session:
             + build_fir_legacy(target_ssrc),
         )
         try:
-            sock.sendto(enc.protect(compound), (self._dest_host, self._ctrl_dest_port))
+            sock.sendto(enc.protect(compound), (self._dest_host, port))
             if log_per_tile:
                 log.debug("FIR/PLI sent for tile %d (ssrc=0x%08x)", tile_idx, target_ssrc)
             if record_grayout:
@@ -4163,7 +4250,7 @@ class Session:
         self._last_concealment_msg = ""
 
     def _drain_pending_nack(self) -> None:
-        sock = self._sock_ctrl
+        sock,port = self._video_feedback_transport()
         enc = self._srtcp_enc
         sender = self._our_video_ssrc
         if sock is None or enc is None or sender is None:
@@ -4177,7 +4264,7 @@ class Session:
                 continue
             compound = compound_with_rr(sender, nack)
             try:
-                sock.sendto(enc.protect(compound), (self._dest_host, self._ctrl_dest_port))
+                sock.sendto(enc.protect(compound), (self._dest_host, port))
             except OSError as e:
                 log.debug("NACK send failed: %s", e)
 

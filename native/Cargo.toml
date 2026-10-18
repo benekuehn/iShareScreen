@@ -1,0 +1,18 @@
+[package]
+name = "isharescreen-native"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "GPU-resident VAAPI decoding and EGL composition for iShareScreen"
+
+[lib]
+name = "isharescreen_native"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

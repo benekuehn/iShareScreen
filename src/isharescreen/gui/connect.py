@@ -284,6 +284,12 @@ def _launch(values: dict) -> None:
     decoder = values.get("decoder", "auto").strip()
     if decoder and decoder != "auto":
         cmd += ["--decoder", decoder]        # explicit pin — session honours it
+        # Pin the negotiated codec too; decoder and codec selection are
+        # independent. Otherwise an AVC selection can still negotiate HEVC.
+        from isharescreen.proxy.media.registry import all_specs
+        spec = next((s for s in all_specs() if s.name == decoder), None)
+        if spec is not None:
+            cmd += ["--codec", spec.codec]
     elif frontend == "desktop" and "ISS_VIDEO_CODEC" not in os.environ:
         # "Auto" on the desktop frontend: the GUI already probed hardware at
         # startup, so pin the DECODER here → the session skips its decoder-build
@@ -350,7 +356,9 @@ def _launch(values: dict) -> None:
             pass
         _STATE["status"] = "ended"
         _emit("status", dict(_STATE))
-        _emit("log", "[gui] iss process exited")
+        code = proc.returncode
+        detail = f"signal {-code}" if code is not None and code < 0 else f"code {code}"
+        _emit("log", f"[gui] iss process exited ({detail})")
 
     threading.Thread(target=_pump, daemon=True).start()
 
@@ -377,7 +385,7 @@ _FORM = """<!doctype html><html><head><title>iShareScreen — Connect</title>__H
   <label>User</label><input type="text" name="user" placeholder="macOS account" value="__USER__">
   <label>Password</label><input type="password" name="password" placeholder="password">
   <label>Frontend</label>
-  <select name="frontend"><option value="browser" __BROWSER_SEL__>browser (WebTransport + WebCodecs)</option><option value="desktop" __DESKTOP_SEL__>desktop (native window)</option></select>
+  <select name="frontend"><option value="browser" __BROWSER_SEL__>browser (WebTransport + WebCodecs)</option><option value="desktop" __DESKTOP_SEL__>desktop (native window)</option><option value="native" __NATIVE_SEL__>native GPU (Linux VAAPI + EGL)</option></select>
   <label>Resolution</label>
   <select name="advertise" title="The encoded pixel resolution = how much bandwidth you use. Higher = sharper + more bandwidth. UI size is set separately by Display scale.">
    <option value="auto" selected>Auto — track window size</option>
@@ -653,6 +661,7 @@ def _decoder_options_html() -> str:
 def _form_page() -> bytes:
     host = user = ""
     frontend = "browser"
+    last = None
     if load_last is not None:
         try:
             last = load_last()
@@ -663,13 +672,30 @@ def _form_page() -> bytes:
             user = getattr(last, "user", "") or ""
             frontend = getattr(last, "frontend", "browser") or "browser"
     import html as _html
-    return (_FORM
+    page = (_FORM
             .replace("__HEAD__", _HEAD)
             .replace("__HOST__", _html.escape(host, quote=True))
             .replace("__USER__", _html.escape(user, quote=True))
             .replace("__BROWSER_SEL__", "selected" if frontend == "browser" else "")
             .replace("__DESKTOP_SEL__", "selected" if frontend == "desktop" else "")
-            .replace("__DECODER_OPTIONS__", _decoder_options_html())).encode()
+            .replace("__DECODER_OPTIONS__", _decoder_options_html()))
+    # Honour the local trial preset instead of silently defaulting to Auto
+    # resolution, 200% scale, and Auto decoder on every new connection.
+    if last is not None:
+        import re
+        for field, value in (("frontend", last.frontend),
+                             ("advertise", last.advertise),
+                             ("scale", last.hidpi),
+                             ("decoder", last.decoder)):
+            pattern = rf'(<select name="{field}"[^>]*>)(.*?)(</select>)'
+            def select_value(match, value=value):
+                options = re.sub(r'\sselected(?=\s|>)', '', match.group(2))
+                token = f'value="{_html.escape(str(value), quote=True)}"'
+                options = options.replace(token + '>', token + ' selected>', 1)
+                return match.group(1) + options + match.group(3)
+            page = re.sub(pattern, select_value, page, flags=re.S)
+    page = page.replace("__NATIVE_SEL__", "selected" if frontend == "native" else "")
+    return page.encode()
 
 
 def _dash_page() -> bytes:

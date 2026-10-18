@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..media.bitstream import BitReader, remove_emulation_prevention
-from ..media.nalu import IDR_RANGE, NAL_PPS, NAL_SPS, NAL_VPS, reassemble_group
+from ..media.nalu import IDR_RANGE, NAL_PPS, NAL_SPS, NAL_VPS, reassemble_group, aggregation_has_donl
 from ..media.avc_nalu import (
     APPLE_CONFIG_MARKER, NAL_SLICE_IDR, parse_avc_config, reassemble_h264)
 from .srtp import SRTPDecryptor
@@ -61,6 +61,7 @@ class InitialBurst:
     tile_nalus: dict[int, list[bytes]]
     burst_pending: dict[tuple[int, int], list[tuple[int, bool, bytes]]]
     codec: str = "hevc"
+    has_donl: bool = True
 
 
 def gather_initial_burst(
@@ -115,6 +116,12 @@ def gather_initial_burst(
             if not pair:
                 continue
             hdr, payload = pair
+            if codec == "hevc":
+                layout = aggregation_has_donl(payload)
+                if layout is not None:
+                    if "has_donl" not in nonlocal_state:
+                        log.info("HEVC RTP layout: DONL=%s", "present" if layout else "absent")
+                    nonlocal_state["has_donl"] = layout
             ssrc = struct.unpack(">I", hdr[8:12])[0]
             seq = struct.unpack(">H", hdr[2:4])[0]
             ts = struct.unpack(">I", hdr[4:8])[0]
@@ -130,8 +137,7 @@ def gather_initial_burst(
             if key in completed:
                 continue
             grp = ssrc_ts_groups[key]
-            if not any(m for _, m, _ in grp):
-                continue
+            complete = any(m for _, m, _ in grp)
             ssrc, _ts = key
             ti = ssrc_to_tile.get(ssrc)
             if ti is None:
@@ -149,6 +155,33 @@ def gather_initial_burst(
             for _s, _t, _p in packets:
                 if _p:
                     nonlocal_state.setdefault("raw_hdr", set()).add(_p[0])
+            if not complete:
+                # Codec configuration can have its own timestamp and no RTP
+                # picture-end marker. Harvest self-contained parameter NALs
+                # now; keep picture data pending until its marker arrives.
+                if codec == "avc":
+                    for _, _, payload in packets:
+                        if payload and payload[0] == APPLE_CONFIG_MARKER:
+                            config = parse_avc_config(payload)
+                            if config:
+                                nonlocal_state["sps"] = config[0]
+                                all_pps[0] = config[1]
+                else:
+                    for nalu in reassemble_group((p for _, _, p in packets), has_donl=nonlocal_state.get("has_donl",True)):
+                        if len(nalu) < 2:
+                            continue
+                        nt = (nalu[0] >> 1) & 0x3F
+                        if nt == NAL_VPS:
+                            nonlocal_state["vps"] = nalu
+                        elif nt == NAL_SPS:
+                            nonlocal_state["sps"] = nalu
+                        elif nt == NAL_PPS:
+                            pps_id = BitReader(remove_emulation_prevention(nalu[2:])).read_ue()
+                            all_pps[pps_id] = nalu
+                        else:
+                            continue
+                        nonlocal_state.setdefault("hdr_bytes", set()).add(nalu[0])
+                continue
             if codec == "avc":
                 payloads = [p for _, _, p in packets]
                 # SPS/PPS arrive in Apple's 0x92 avc1/avcC config packet, not
@@ -171,7 +204,7 @@ def gather_initial_burst(
                         tile_nalus[ti].append(nalu)
                 completed.add(key)
                 continue
-            for nalu in reassemble_group([p for _, _, p in packets]):
+            for nalu in reassemble_group([p for _, _, p in packets], has_donl=nonlocal_state.get("has_donl",True)):
                 if len(nalu) < 2:
                     continue
                 nt = (nalu[0] >> 1) & 0x3F
@@ -220,7 +253,7 @@ def gather_initial_burst(
     _has_hevc_ap  = any(((b >> 1) & 0x3F) == 48 for b in _raw)
     _has_hevc_fu  = any(((b >> 1) & 0x3F) == 49 for b in _raw)
     _is_hevc = _has_hevc_params or _has_hevc_ap or _has_hevc_fu
-    _is_h264 = any((b & 0x80) == 0 and (b & 0x1F) in (1, 5, 7, 8, 24, 28, 29) for b in _raw) and not _has_hevc_params
+    _is_h264 = any((b & 0x80) == 0 and (b & 0x1F) in (1, 5, 7, 8, 24, 28, 29) for b in _raw) and not (_has_hevc_params or _has_hevc_ap)
     # Tiebreaker for ambiguous FU bytes only: if codec=avc and no AP packets
     # (which would be conclusive HEVC evidence), treat as H.264 data partition.
     if _has_hevc_fu and not _has_hevc_params and not _has_hevc_ap and not _is_h264 and codec == "avc":
@@ -259,6 +292,7 @@ def gather_initial_burst(
         tile_nalus=dict(tile_nalus),
         burst_pending=burst_pending,
         codec=codec,
+        has_donl=nonlocal_state.get("has_donl",True),
     )
 
 

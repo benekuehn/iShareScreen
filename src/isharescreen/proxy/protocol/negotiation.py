@@ -181,7 +181,7 @@ def build_0x1c(
     # only by ISS_LEGACY_CURSOR=1). In both cases the local enc-1104 overlay
     # renders the cursor, so the agent never bakes it into encoded frames —
     # which is what keeps cursor motion from generating needless frames.
-    config_flags = 3
+    config_flags = 1 if os.environ.get("ISS_SINGLE_VIDEO_STREAM") == "1" else 3
     if alt_session:
         config_flags = (config_flags & ~2) | 4   # drop bit 1, set bit 2
     elif os.environ.get("ISS_LEGACY_CURSOR") != "1":

@@ -144,7 +144,8 @@ def _ltrp_enabled_for_codec(codec: str) -> bool:
     Evaluate this at offer-build time rather than module import time: the CLI
     resolves ``--codec`` after importing the protocol modules.
     """
-    return codec != "avc" and _os.environ.get("ISS_LTRP", "1") != "0"
+    # Single-picture HEVC omits the DONL used as our LTR acknowledgment key.
+    return codec != "avc" and tiles_per_frame() > 1 and _os.environ.get("ISS_LTRP", "1") != "0"
 
 
 def _build_remote_endpoint_info() -> bytes:

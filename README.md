@@ -5,6 +5,10 @@ Performance** mode (HEVC RExt 4:4:4 over UDP/SRTP). Renders the host
 Mac's screen in a native wgpu window with hardware decode where
 available.
 
+This fork includes an experimental Linux GPU decode/composition path. See
+[native/README.md](native/README.md) for build instructions, validation and
+current limitations. Run `--frontend native` to try it.
+
 ## Setup
 
 ### On the host Mac (the target you want to view)

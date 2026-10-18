@@ -45,6 +45,8 @@ class DecoderSpec:
     note: str = ""
 
     def supported_here(self) -> bool:
+        if self.name.startswith("native-") and os.environ.get("ISS_NATIVE_GPU") != "1":
+            return False
         return "*" in self.platforms or sys.platform in self.platforms
 
 
@@ -68,6 +70,15 @@ def _vt_available() -> bool:
 
 
 # ── build factories (lazy import of the decoder class) ───────────────────
+def _native_available(codec):
+    from .native import available
+    return available(codec)
+
+
+def _build_native(codec, num_tiles, **kwargs):
+    from .native import make_decoder
+    return make_decoder(codec, num_tiles, **kwargs)
+
 # Each accepts the common kwargs and ignores the rest via **_, so the
 # registry can call every spec uniformly even though VT/QSV decoders don't
 # take `prefer_hwaccel`.
@@ -127,6 +138,14 @@ def _build_avc(num_tiles, *, enable_quality_gate=True, on_frame_published=None,
 #    20  libav-hevc444-sw  SOFTWARE HEVC 4:4:4 — manual override only (slow for
 #                          live 4-tile streams); not on the auto ladder.
 _REGISTRY: list[DecoderSpec] = [
+    DecoderSpec("native-hevc444", "hevc", "444", ("linux",), "hardware", 200,
+                available=lambda: _native_available("hevc"),
+                build=lambda n, **kw: _build_native("hevc", n, **kw),
+                note="Rust/FFmpeg VAAPI GPU surfaces → EGL composition (native frontend)"),
+    DecoderSpec("native-avc420", "avc", "420", ("linux",), "hardware", 200,
+                available=lambda: _native_available("h264"),
+                build=lambda n, **kw: _build_native("h264", n, **kw),
+                note="Rust/FFmpeg VAAPI GPU surfaces → EGL composition (native frontend)"),
     DecoderSpec("vt-hevc444", "hevc", "444", ("darwin",), "hardware", 100,
                 available=lambda: _vt_available(), build=_build_vt,
                 note="direct VideoToolbox (VTDecompressionSession, no libav RPS layer)"),

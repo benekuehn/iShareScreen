@@ -321,6 +321,10 @@ class AvcDecoder:
             c.flags = _CODEC_FLAG_LOW_DELAY
             c.flags2 = _CODEC_FLAG2_FAST
             c.open()
+            from .hardware import hardware_configured
+            if not hardware_configured(c):
+                log.info("AVC hwaccel %s absent from this PyAV/FFmpeg build", hw_type)
+                return None
             return c
         except Exception as e:
             log.info("AVC hwaccel %s unavailable: %s", hw_type, e)
@@ -465,6 +469,10 @@ class AvcDecoder:
                 self._gate.mark_decode_error(tile_idx)
                 return
             for frame in frames:
+                if self._hw_name is not None:
+                    from .hardware import hardware_active
+                    if not hardware_active(ctx, frame):
+                        self.mark_hwaccel_failed("requested backend did not bind")
                 ti = self._pts_to_tile.pop(frame.pts, tile_idx)
                 submit_t = self._pts_submit_t.pop(frame.pts, None)
                 # The libav callback can arm recovery synchronously from inside
@@ -649,6 +657,10 @@ class AvcDecoder:
             self._codec = None
         self._pts_to_tile.clear()
         self._pts_submit_t.clear()
+        for slot in self._tiles:
+            with slot.lock:
+                slot.raw_frame = None
+                slot.last_evaluated_count = slot.good_count
         self._dpb_ready = False
         self._await_key = True
         self._decode_latency_ms = 0.0

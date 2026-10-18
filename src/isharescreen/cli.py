@@ -105,9 +105,9 @@ def _make_parser() -> argparse.ArgumentParser:
         help="authentication mode (default srp; falls back to nonsrp on rejection)",
     )
     g.add_argument(
-        "--frontend", choices=("browser", "desktop"), default="browser",
+        "--frontend", choices=("browser", "desktop", "native"), default="browser",
         help="browser = WebTransport+WebCodecs in a browser tab, H.264 "
-        "pass-through (default); desktop = native wgpu/Qt window",
+        "pass-through (default); desktop = wgpu window; native = Linux VAAPI/EGL GPU window",
     )
     g.add_argument(
         "--bridge-port", type=int, default=4433,
@@ -458,6 +458,30 @@ def _run_frontend(config: SessionConfig, args: argparse.Namespace) -> int:
     """Open the selected frontend. Default is the browser (WebTransport +
     WebCodecs, H.264 pass-through) since every machine has a browser; the
     native wgpu/desktop viewer stays available via --frontend desktop."""
+    if args.frontend == "native":
+        sys.setswitchinterval(0.001)
+        os.environ["ISS_NATIVE_GPU"] = "1"
+        os.environ.setdefault("ISS_LOG_LIBAV", "0")
+        # A single HEVC picture avoids Apple's cross-tile reference chain.
+        # VAAPI still receives the full 4:4:4 picture, with no CPU readback.
+        os.environ.setdefault("ISS_TILES_PER_FRAME", "1")
+        os.environ.setdefault("ISS_SINGLE_VIDEO_STREAM", "1")
+        os.environ.setdefault("ISS_VIDEO_RTCP_MUX", "1")
+        from .proxy.media.native import available
+        codec = args.codec
+        override = os.environ.get("ISS_DECODER", "auto")
+        if override not in ("auto", "native-hevc444", "native-avc420"):
+            raise ValueError("The native frontend requires a native decoder; choose Auto, native-hevc444 or native-avc420")
+        if override == "native-avc420":
+            codec = "avc"
+        elif override == "native-hevc444":
+            codec = "hevc"
+        elif codec == "auto":
+            codec = "hevc" if available("hevc") else "avc"
+        os.environ["ISS_VIDEO_CODEC"] = codec
+        os.environ["ISS_DECODER"] = "native-avc420" if codec == "avc" else "native-hevc444"
+        from .frontend.native.app import run as run_native
+        return run_native(config,auto_quit_secs=args.auto_quit_secs)
     if args.frontend == "desktop":
         # Auto codec ladder: offer HEVC when this machine has a HEVC 4:4:4
         # hardware decoder (VideoToolbox / generic HW / QSV), else fall back to

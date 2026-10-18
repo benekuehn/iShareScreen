@@ -141,6 +141,8 @@ def _av_frame_to_tile(
     if had_error:
         log.debug("decode error: decode_error_flags=%d flags=0x%x", err, flg)
     fmt = frame.format.name
+    if getattr(frame, "gpu_surface", False):
+        return frame, had_error
     width = frame.width
     height = frame.height
     if fmt not in seen_fmts:

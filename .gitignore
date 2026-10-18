@@ -5,6 +5,10 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv*/
+native/target/
+local-state/
+*.so
 .idea/
 .vscode/
 tools/*

@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 import time
 import types
+import pytest
 
 from isharescreen.proxy.media.quality_gate import FrameQualityGate
 from isharescreen.proxy.session import Session
@@ -44,8 +45,11 @@ def test_missing_first_packet_of_next_group_waits_for_repair():
     assert key in session._pending_groups
 
 
-def test_incomplete_marker_waits_and_late_packet_unblocks_in_order():
+@pytest.mark.parametrize("codec",["avc","hevc"])
+def test_incomplete_marker_waits_and_late_packet_unblocks_in_order(codec):
     session = _group_session()
+    session._video_codec=codec
+    session._hevc_has_donl=False
     flushed: list[tuple[int, int]] = []
 
     def flush(key):

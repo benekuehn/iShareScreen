@@ -9,6 +9,22 @@ from isharescreen.proxy.session import Session
 import isharescreen.proxy.session as session_mod
 
 
+def test_geometry_change_does_not_publish_old_codec_frames():
+    session = Session.__new__(Session)
+    session._decoder = types.SimpleNamespace(get_frame=lambda _ti: "old frame")
+    for flag in ("_needs_param_harvest", "_avc_needs_reconfig"):
+        setattr(session, flag, True)
+        assert session.get_frame(0) is None
+        setattr(session, flag, False)
+
+
+def test_oversized_tile_never_reaches_gpu_upload():
+    from isharescreen.frontend.desktop.gpu import Renderer
+    renderer = Renderer.__new__(Renderer)
+    renderer._w = 1920
+    renderer.upload_tile(0, types.SimpleNamespace(width=3840), 540)
+
+
 def _bare_geometry_session(
     canvas: tuple[int, int], rects: list[DisplayRect],
 ) -> Session:

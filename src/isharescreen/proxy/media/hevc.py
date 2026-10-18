@@ -17,11 +17,11 @@ RX threads enqueue NALUs and return; libavcodec releases the GIL inside
 HEVC heavy lifting happens.
 
 Hardware acceleration is requested per-platform (D3D11VA on Windows, VAAPI
-on Linux); macOS intentionally runs software-only (see _PLATFORM_HWACCELS).
-Software libavcodec is the universal fallback and, in practice, the path
-nearly everyone hits: Apple's stream is HEVC RExt 4:4:4, which the common
-desktop HW decoders (D3D11VA/DXVA2/VAAPI) do not support — they are 4:2:0
-only — so the decoder silently stays on software for this stream.
+on Linux); this libav implementation runs software-only on macOS (the registry
+prefers its separate VideoToolbox implementation). HEVC RExt 4:4:4 support
+depends on the GPU, driver and linked FFmpeg build. Runtime probes and actual
+context state determine hardware availability; downloaded CPU frames alone
+do not prove that decoding ran in software.
 
 The frame-stats quality gate (gray / black / green-pop detection + FIR
 escalation) lives in `quality_gate.py`.
@@ -118,12 +118,8 @@ _PTS_MAP_SOFT_MAX = 4000
 _PTS_MAP_PRUNE_KEEP = 2000
 
 # Per-platform HW accel candidate list, in priority order.
-# macOS deliberately has NO hwaccel: Apple's stream is HEVC RExt 4:4:4 and
-# the only macOS HW path for it is VideoToolbox, but a real macOS user would
-# run Apple's own Screen Sharing.app, not iss. Forcing software decode on
-# macOS keeps it on the exact same libavcodec path as Windows/Linux (where
-# 4:4:4 has no HW decoder either — D3D11VA/DXVA2/VAAPI are 4:2:0-only), so
-# the macOS box is a faithful test bed for the platforms that matter.
+# The separate native VideoToolbox decoder covers macOS. Probe Linux and
+# Windows backends rather than inferring HEVC 4:4:4 support from their names.
 _PLATFORM_HWACCELS: dict[str, tuple[str, ...]] = {
     "darwin": (),
     "win32": ("d3d11va", "d3d12va"),
@@ -429,7 +425,14 @@ class HevcDecoder:
             # slice NALUs have an RPS we can check. IDRs (16-21) reset
             # the DPB and have no inter-picture refs to validate.
             from .hevc_rps import IRAP_RANGE
-            if nal_unit_type < 32 and nal_unit_type not in IRAP_RANGE:
+            # For the single-picture native path, actual FFmpeg error flags
+            # and RTP repair determine corruption. The predictive tracker can
+            # miss burst history and request needless FIRs against clean GPU
+            # output; there is also no DONL/LTR acknowledgment to derive here.
+            predictive_recovery = not (
+                self.num_tiles == 1 and getattr(self._codec, "gpu_surfaces", False)
+            )
+            if nal_unit_type < 32 and nal_unit_type not in IRAP_RANGE and predictive_recovery:
                 missing = self._rps_tracker.check_slice(nalu)
                 # Commit the POC unconditionally. Apple's stream is
                 # 4 tiles sharing one codec context with independent
@@ -748,8 +751,9 @@ class HevcDecoder:
         # a GPU surface. The decode itself is unaffected; only the label.
         if not self._hw_verified:
             self._hw_verified = True
+            from .hardware import hardware_active
             if (self._hw_name is not None
-                    and frame.format.name not in _HW_FRAME_FORMATS):
+                    and not hardware_active(self._codec, frame)):
                 log.warning(
                     "hwaccel %r did not bind for this stream (output=%s); "
                     "decoding in software", self._hw_name, frame.format.name,
@@ -1049,6 +1053,10 @@ class HevcDecoder:
             c.flags = _CODEC_FLAG_LOW_DELAY
             c.flags2 = _CODEC_FLAG2_FAST
             c.open()
+            from .hardware import hardware_configured
+            if not hardware_configured(c):
+                log.info("hwaccel %s absent from this PyAV/FFmpeg build", hw_type)
+                return None
             return c
         except Exception as e:
             log.info("hwaccel %s unavailable: %s", hw_type, e)

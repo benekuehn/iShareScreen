@@ -460,6 +460,10 @@ class Renderer:
         encoder padding past `canvas_h`) are dropped from the display.
         """
         w = tile.width
+        # A layout message can overtake a frame already being extracted on
+        # the render thread. Reject the whole stale tile before any upload.
+        if w <= 0 or w > self._w or tile_index < 0 or slot_height <= 0:
+            return
         origin_y = tile_index * slot_height
         remaining = max(0, self._h - origin_y)
         rows = min(tile.height, slot_height, remaining)
