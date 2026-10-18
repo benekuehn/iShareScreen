@@ -59,6 +59,8 @@ class RenderLoop:
             last_redraw = -1
             profile_started = time.monotonic()
             last_decoded = sum(self.session._decoder.good_counts)
+            last_clean = sum(getattr(self.session._decoder, "clean_counts", []))
+            last_assembled = getattr(self.session, "video_access_units", 0)
             presents = uploads = 0
             last_surface_stats = {}
             compose_times, swap_times = [], []
@@ -125,6 +127,8 @@ class RenderLoop:
                 elapsed = time.monotonic() - profile_started
                 if elapsed >= 5:
                     decoded = sum(self.session._decoder.good_counts)
+                    clean = sum(getattr(self.session._decoder, "clean_counts", []))
+                    assembled = getattr(self.session, "video_access_units", 0)
                     surface_stats = getattr(
                         self.session._decoder, "presentation_stats", dict
                     )()
@@ -133,7 +137,7 @@ class RenderLoop:
                         for key, value in surface_stats.items()
                     }
                     log.info(
-                        "native profile: canvas=%s submitted_fps=%.1f decoder_output_fps=%.1f "
+                        "native profile: canvas=%s submitted_fps=%.1f decoder_output_fps=%.1f clean_frame_fps=%.1f assembled_fps=%.1f "
                         "tile_updates=%d compose_p95_ms=%.2f swap_p95_ms=%.2f "
                         "decode_queue=%d generation=%s surfaces=%s "
                         "output_age_p95_ms=%.2f ready_observed_p95_ms=%.2f "
@@ -141,6 +145,8 @@ class RenderLoop:
                         canvas,
                         presents / elapsed,
                         max(0, decoded - last_decoded) / elapsed,
+                        max(0, clean - last_clean) / elapsed,
+                        max(0, assembled - last_assembled) / elapsed,
                         uploads,
                         percentile(compose_times),
                         percentile(swap_times),
@@ -160,6 +166,8 @@ class RenderLoop:
                     submit_ages.clear()
                     profile_started = time.monotonic()
                     last_decoded = decoded
+                    last_clean = clean
+                    last_assembled = assembled
         except BaseException as exc:
             self.error = exc
             log.exception("native rendering failed")

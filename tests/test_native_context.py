@@ -1,6 +1,7 @@
 """Packet retry and strict hardware probing at the opaque native ABI boundary."""
 
 from types import SimpleNamespace as S
+import threading
 
 import av
 import pytest
@@ -147,5 +148,73 @@ def test_decoder_retains_completed_picture_when_newer_gpu_work_is_pending():
         assert decoder.get_frame(0) is None
         newer.ready = True
         assert decoder.get_frame(0) is newer
+    finally:
+        decoder.close()
+
+
+def test_native_avc_receive_does_not_wait_for_gpu_decode(monkeypatch):
+    from isharescreen.proxy.media.avc import AvcDecoder
+
+    entered, release = threading.Event(), threading.Event()
+    seen = []
+
+    def decode(_self, nalu, tile, donl=None):
+        seen.append((threading.get_ident(), nalu, tile))
+        entered.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr(AvcDecoder, "feed_nalu", decode)
+    decoder = native.make_decoder("h264", 1)
+    try:
+        decoder.feed_nalu(b"first", 0)
+        assert entered.wait(2)
+        # The GPU worker is blocked, but the packet processor can enqueue
+        # the next access unit immediately, retaining reference order.
+        decoder.feed_nalu(b"second", 0)
+        assert decoder.decode_queue_depth == 1
+        assert seen == [(decoder._avc_worker.ident, b"first", 0)]
+        assert decoder._avc_worker.ident != threading.get_ident()
+    finally:
+        release.set()
+        decoder.close()
+    assert not decoder._avc_worker.is_alive()
+
+
+def test_native_avc_ignores_queued_frames_from_previous_configuration(monkeypatch):
+    from isharescreen.proxy.media.avc import AvcDecoder
+
+    seen, finished = [], threading.Event()
+
+    def decode(_self, nalu, tile, donl=None):
+        seen.append(nalu)
+        finished.set()
+
+    monkeypatch.setattr(AvcDecoder, "feed_nalu", decode)
+    decoder = native.make_decoder("h264", 1)
+    try:
+        decoder.set_params(b"", b"sps", {0: b"pps"})
+        decoder._avc_queue.put((decoder._avc_epoch - 1, b"stale", 0, None))
+        decoder.feed_nalu(b"current", 0)
+        assert finished.wait(2)
+        assert seen == [b"current"]
+    finally:
+        decoder.close()
+
+
+def test_small_native_single_picture_idr_can_complete_recovery(monkeypatch):
+    decoder = native.make_decoder("hevc", 1)
+    observed = []
+    decoder._codec = S(gpu_surfaces=True, decode=lambda _: [], close=lambda: None)
+    decoder._recent_idr_sizes = [10000, 10000, 10000]
+    monkeypatch.setattr(
+        decoder._gate,
+        "mark_idr_observed",
+        lambda tile, suspicious=False: observed.append((tile, suspicious)),
+    )
+    try:
+        # A valid first-slice header with a much smaller compressed payload.
+        decoder._decode_one(bytes([20 << 1, 1, 0x80]) + b"\0" * 100, 0)
+        assert observed == [(0, False)]
+        assert decoder._dpb_has_idr
     finally:
         decoder.close()

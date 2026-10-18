@@ -631,7 +631,14 @@ class HevcDecoder:
             size = len(nalu)
             history = self._recent_idr_sizes
             suspicious = False
-            if len(history) >= 3:
+            # On the native single-picture path, complete RTP access units
+            # and actual decoder errors determine recovery. A smaller IDR is
+            # normal after a content change (e.g. detailed desktop → flat
+            # animation); size alone must not keep clean output in FIR recovery.
+            size_heuristic = not (
+                len(self._tiles) == 1 and getattr(codec, "gpu_surfaces", False)
+            )
+            if size_heuristic and len(history) >= 3:
                 sorted_h = sorted(history)
                 median = sorted_h[len(sorted_h) // 2]
                 if size < median * self._IDR_FAKE_RATIO:

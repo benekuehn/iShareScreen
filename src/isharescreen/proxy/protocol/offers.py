@@ -264,7 +264,10 @@ def _build_mediablob(
             # its preferred (HEVC 4:4:4) — the default native path.
             _codec_banks = _field_bytes(3, hevc_bank) + _field_bytes(3, avc_bank)
         desc = (
-            _field_varint(1, session_id) + _field_varint(2, 1 if ltrp_on else 0)
+            # RTCP feedback (NACK/keyframe requests) is independent of LTR.
+            # Single-picture HEVC and AVC do not use DONL/LTR acknowledgments,
+            # but still require packet-loss feedback for reference recovery.
+            _field_varint(1, session_id) + _field_varint(2, 1)
             + _codec_banks
             + _field_varint(6, _tiles_per_frame) + _field_varint(7, 1 if ltrp_on else 0)
             + _field_varint(8, 63)

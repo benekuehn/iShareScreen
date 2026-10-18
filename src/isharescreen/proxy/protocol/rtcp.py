@@ -132,7 +132,9 @@ def build_rr(
         stats = (ssrc_stats or {}).get(ssrc, {})
         max_seq = stats.get("max_seq", 0)
         roc = stats.get("roc", 0)
-        ext_seq = ((roc & 0xFFFF) << 16) | (max_seq & 0xFFFF)
+        ext_seq = stats.get("extended_seq", ((roc & 0xFFFF) << 16) | (max_seq & 0xFFFF))
+        cumulative = max(-0x800000, min(0x7fffff, stats.get("lost", 0)))
+        fraction = max(0, min(255, stats.get("fraction_lost", 0)))
 
         lsr = dlsr = 0
         if sr_data and ssrc in sr_data:
@@ -142,9 +144,9 @@ def build_rr(
         out += struct.pack(
             ">IIIIII",
             ssrc,
-            0,            # fraction lost (8) | cumulative lost (24)
+            (fraction << 24) | (cumulative & 0xffffff),
             ext_seq,
-            0,            # interarrival jitter
+            stats.get("jitter", 0),
             lsr,
             dlsr,
         )

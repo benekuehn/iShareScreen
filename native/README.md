@@ -8,6 +8,9 @@ handshake and live session into a buffer bounded at 16,384 packets / 32 MiB.
 It prevents GIL stalls from overflowing the kernel receive queue; overflow is
 counted in the session's drop telemetry. Packet-capture mode retains the existing
 socket path so its recorder continues to see every application receive.
+Native AVC decoding also runs on a separate bounded worker, so waiting for
+GPU completion cannot stop RTP decryption/assembly. Configuration epochs discard
+queued work from before a resize/restart; codec shutdown waits for that worker.
 
 The existing Python session still handles authentication, transport decryption,
 loss recovery, input, audio and clipboard. This is not a complete Rust client.
@@ -24,6 +27,15 @@ HEVC omits DONL; the client detects that layout from aggregation packet lengths
 and carries it into fragment/single-NAL parsing. LTR acknowledgment is disabled
 when there is no DONL to echo. A short, bounded NACK/reorder window applies to
 this stream as well as AVC. Unchanged desktops naturally produce fewer updates.
+NACK requests cover up to 1,024 recent missing packets (large intra pictures
+can span hundreds). Receiver reports carry measured interval/cumulative loss
+and RTP-clock jitter, including late/duplicate reception, rather than zero
+placeholders. Jitter includes client packet-processing scheduling delay.
+The offer keeps RTCP feedback enabled independently of LTR acknowledgments;
+disabling DONL/LTR must not disable packet-loss feedback for a single picture.
+For native single-picture decoding, compressed IDR size alone does not prevent
+recovery: simpler content can produce a much smaller valid IDR. Transport
+completeness and decoder error signals remain active.
 
 ## Build on Linux
 
@@ -159,6 +171,13 @@ The native profile reports **submitted_fps**, not confirmed display FPS, and
 **decoder_output_fps**, not GPU completion rate. Wayland presentation feedback
 is still needed to verify physical presentation. Duplicating an unchanged frame
 must not inflate these measurements.
+`clean_frame_fps` comes from each backend's clean-frame counter: HEVC counts
+clean decoder output; AVC counts clean frames evaluated by its consumer. It
+does not prove physical display presentation.
+`assembled_fps` counts complete picture access units handed to the decoder,
+allowing comparison of incoming stream throughput with decoder output and swap
+submission. It excludes parameter-only groups and includes pictures that later
+fail decoding.
 
 The profile also counts published/taken/superseded surfaces and polls with no
 ready surface. `output_age_p95_ms` measures decoder output to renderer selection;
@@ -169,9 +188,10 @@ completion timestamps. An unsupported readiness query uses synchronized upload
 without inventing a completion timestamp. None of these measure host capture,
 network transit or monitor scanout.
 
-The temporary macOS motion benchmark provides continuous changes for 60 seconds
-and exits automatically. Run `benchmarks/macos/script/build_and_run.sh --verify`
-on the host after the viewer connects; desktop idle time is not an FPS test.
+The temporary macOS motion benchmark provides continuous changes and exits
+automatically. Run `benchmarks/macos/script/build_and_run.sh --verify 180`
+on the host after the viewer connects for a three-minute test. Duration defaults
+to 60 seconds and is bounded to 1–600 seconds; desktop idle time is not an FPS test.
 
 The initial scope is Linux, VAAPI, one SDR display. HDR, other acceleration APIs,
 multi-display window management and a standalone Rust protocol/UI port remain

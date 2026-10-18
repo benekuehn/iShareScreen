@@ -2,6 +2,11 @@
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-run}"
+duration="${2:-60}"
+if [[ ! $duration =~ ^[0-9]+$ ]] || (( duration < 1 || duration > 600 )); then
+  echo "Duration must be 1–600 seconds." >&2
+  exit 2
+fi
 bundle="$root/../../native/target/ISSMotionBench.app"
 pkill -x ISSMotionBench >/dev/null 2>&1 || true
 mkdir -p "$bundle/Contents/MacOS"
@@ -20,11 +25,11 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-/usr/bin/open -n "$bundle"
+/usr/bin/open -n "$bundle" --args "$duration"
 case "$mode" in
   run) ;;
   --verify) sleep 1; pgrep -x ISSMotionBench >/dev/null ;;
   --debug) sleep 1; lldb -n ISSMotionBench ;;
   --logs|--telemetry) /usr/bin/log stream --info --style compact --predicate 'process == "ISSMotionBench"' ;;
-  *) echo "Usage: $0 [run|--verify|--debug|--logs|--telemetry]" >&2; exit 2 ;;
+  *) echo "Usage: $0 [run|--verify|--debug|--logs|--telemetry] [duration-seconds]" >&2; exit 2 ;;
 esac

@@ -1,13 +1,35 @@
 """AVC RTP loss waits briefly for NACK repair without reordering frames."""
+
 from __future__ import annotations
 
 import threading
+from collections import defaultdict
 import time
 import types
 import pytest
 
 from isharescreen.proxy.media.quality_gate import FrameQualityGate
 from isharescreen.proxy.session import Session
+
+
+@pytest.mark.parametrize("start", [100, 65500])
+def test_nack_covers_a_4k_picture_gap_larger_than_31_packets(start):
+    session = Session.__new__(Session)
+    source = 10
+    session._max_seq = {source: start}
+    session._roc = {source: 0}
+    session._received_pkts = session._lost_pkts = 0
+    session._ssrc_to_tile = {source: 0}
+    session._lost_pkts_per_tile = [0]
+    session._nack_pending = defaultdict(set)
+    session._track_seq(source, (start + 200) & 0xFFFF)
+    assert session._nack_pending[source] == {
+        (start + offset) & 0xFFFF for offset in range(1, 200)
+    }
+    session._track_seq(source, (start + 50) & 0xFFFF)
+    assert (start + 50) & 0xFFFF not in session._nack_pending[source]
+    session._track_seq(source, (start + 5000) & 0xFFFF)
+    assert len(session._nack_pending[source]) <= 1024
 
 
 def _group_session() -> Session:
@@ -45,11 +67,11 @@ def test_missing_first_packet_of_next_group_waits_for_repair():
     assert key in session._pending_groups
 
 
-@pytest.mark.parametrize("codec",["avc","hevc"])
+@pytest.mark.parametrize("codec", ["avc", "hevc"])
 def test_incomplete_marker_waits_and_late_packet_unblocks_in_order(codec):
     session = _group_session()
-    session._video_codec=codec
-    session._hevc_has_donl=False
+    session._video_codec = codec
+    session._hevc_has_donl = False
     flushed: list[tuple[int, int]] = []
 
     def flush(key):

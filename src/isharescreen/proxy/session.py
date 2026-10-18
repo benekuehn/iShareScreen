@@ -75,6 +75,7 @@ from .protocol.srtp import (
     SRTPDecryptor,
     SRTPEncryptor,
 )
+from .protocol.rtp_stats import ReceptionStats
 
 
 log = logging.getLogger(__name__)
@@ -172,6 +173,10 @@ _PENDING_GROUP_TTL_S = 0.2
 # milliseconds; 75 ms gives generous headroom without adding latency to
 # healthy frames, which still flush immediately.
 _AVC_RTP_REPAIR_WAIT_S = 0.075
+# A 4K intra picture spans hundreds of datagrams. Asking for only the first
+# 31 packets of a larger gap guarantees that such a picture cannot be repaired.
+# Bound requests to a useful recent packet window, including across sequence wrap.
+_NACK_PACKET_WINDOW = 1024
 
 # How long a completed (marker-flushed) (SSRC, ts) key stays in the dedup
 # set so we drop late retransmits of already-processed packets without
@@ -469,6 +474,9 @@ class Session:
 
         # Per-SSRC sequence tracking for NACK detection + receiver reports.
         self._max_seq: dict[int, int] = {}
+        self._video_receiver_stats: dict[int, ReceptionStats] = {}
+        self._last_receiver_reports: dict[int, dict] = {}
+        self.video_access_units = 0
         self._roc: dict[int, int] = {}
         self._nack_pending: dict[int, set[int]] = defaultdict(set)
         # Cumulative packet-loss tracking. Lets consumers report a
@@ -1684,6 +1692,9 @@ class Session:
         self._last_group_marker_seq = {}
         self._last_group_evict_t = 0.0
         self._max_seq = {}
+        self._video_receiver_stats = {}
+        self._last_receiver_reports = {}
+        self.video_access_units = 0
         self._roc = {}
         self._nack_pending = defaultdict(set)
         self._server_sr = {}
@@ -2410,6 +2421,11 @@ class Session:
             ts = struct.unpack(">I", hdr[4:8])[0]
             marker = bool(hdr[1] & 0x80)
 
+            stats = self._video_receiver_stats.get(ssrc)
+            if stats is None:
+                stats = self._video_receiver_stats[ssrc] = ReceptionStats()
+            stats.observe(seq, ts, time.monotonic())
+
             self._track_seq(ssrc, seq)
             self._note_unknown_ssrc(ssrc)
             self._queue_video_group_packet(ssrc, ts, seq, marker, payload)
@@ -2672,6 +2688,17 @@ class Session:
             # dropped one.
             return
 
+        # Complete picture AUs arriving at the decoder boundary. Unlike the
+        # output counter this does not depend on successful decode, and unlike
+        # packet rates it is independent of compression/fragment count.
+        if any(
+            (len(nalu) >= 3 and ((nalu[0] >> 1) & 0x3f) < 32 and bool(nalu[2] & 0x80))
+            if self._video_codec != "avc" else
+            (bool(nalu) and (nalu[0] & 0x1f) in (1, 5))
+            for nalu in nalus
+        ):
+            self.video_access_units = getattr(self, "video_access_units", 0) + 1
+
         # Forward the raw AU to the browser BEFORE decoding it here. The browser
         # frontend decodes in WebCodecs and does not consume iss's decode output
         # — gating the forward behind self._decoder.feed_nalu() (a synchronous
@@ -2891,13 +2918,18 @@ class Session:
         # Only `_drop_incomplete_group` escalates after that window expires.
         tile_idx = self._ssrc_to_tile.get(ssrc)
         had_loss = False
-        for missed in range(1, min(diff, 32)):
+        for missed in range(max(1, diff - _NACK_PACKET_WINDOW), diff):
             lost = (prev + missed) & 0xFFFF
             self._nack_pending[ssrc].add(lost)
             self._lost_pkts += 1
             had_loss = True
             if tile_idx is not None and tile_idx < len(self._lost_pkts_per_tile):
                 self._lost_pkts_per_tile[tile_idx] += 1
+        if len(self._nack_pending[ssrc]) > _NACK_PACKET_WINDOW:
+            self._nack_pending[ssrc] = {
+                value for value in self._nack_pending[ssrc]
+                if 0 < ((seq - value) & 0xffff) <= _NACK_PACKET_WINDOW
+            }
         if had_loss:
             wake = getattr(self, "_tx_wakeup", None)
             if wake is not None:
@@ -4024,6 +4056,7 @@ class Session:
                     for g, r, l in zip(good, rates, loss_delta)
                 ],
                 "loss_total": loss_total,
+                "rtcp_receiver": self._last_receiver_reports,
                 "loss_unmapped": loss_unmapped,
                 "ssrc_groups": ssrc_groups,
                 "last_publish_age_s": round(last_publish_age, 2),
@@ -4091,6 +4124,10 @@ class Session:
             s: {"max_seq": self._max_seq.get(s, 0), "roc": self._roc.get(s, 0)}
             for s in sources
         }
+        for source, stats in getattr(self, "_video_receiver_stats", {}).copy().items():
+            if source in ssrc_stats:
+                ssrc_stats[source] = stats.report()
+        self._last_receiver_reports = ssrc_stats
         rr = build_rr(
             sender_ssrc, source_ssrcs=sources,
             ssrc_stats=ssrc_stats, sr_data=self._server_sr,

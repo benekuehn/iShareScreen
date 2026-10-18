@@ -13,6 +13,7 @@ import functools
 import logging
 import threading
 import os
+import queue
 import sys
 import time
 from pathlib import Path
@@ -267,7 +268,93 @@ def make_decoder(codec, num_tiles, **kwargs):
 
             self._surface_lock = threading.Lock()
             self._surfaces = [ReadySurfaces() for _ in range(num_tiles)]
+            self._avc_order = threading.Lock()
+            self._avc_epoch = 0
+            self._avc_stop = threading.Event()
+            self._avc_queue = queue.Queue(maxsize=128)
             super().__init__(num_tiles, **options)
+            self._avc_worker = None
+            if codec == "h264":
+                self._avc_worker = threading.Thread(
+                    target=self._run_avc, name="native-avc-decode", daemon=True
+                )
+                self._avc_worker.start()
+
+        def _run_avc(self):
+            while not self._avc_stop.is_set():
+                try:
+                    epoch, nalu, tile, donl = self._avc_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                with self._avc_order:
+                    if epoch != self._avc_epoch or self._avc_stop.is_set():
+                        continue
+                    try:
+                        super().feed_nalu(nalu, tile, donl=donl)
+                    except Exception:
+                        log.exception("native AVC decode worker failed")
+                        self.mark_reference_chain_broken("decode worker exception")
+                        self._gate.mark_decode_error(tile)
+
+        def feed_nalu(self, nalu, tile_idx, donl=None):
+            if codec != "h264":
+                return super().feed_nalu(nalu, tile_idx, donl=donl)
+            if self._avc_stop.is_set():
+                return
+            try:
+                self._avc_queue.put_nowait(
+                    (self._avc_epoch, bytes(nalu), tile_idx, donl)
+                )
+            except queue.Full:
+                self._queue_full_drops += 1
+                self.mark_reference_chain_broken("native decode queue overflow")
+                self._gate.mark_decode_error(tile_idx)
+
+        def feed_burst(self, cache):
+            if codec != "h264":
+                return super().feed_burst(cache)
+            # Before live receive starts, preserve the full burst without
+            # overflowing the bounded live queue.
+            with self._avc_order:
+                for tile, nalus in cache.items():
+                    for nalu in nalus:
+                        super().feed_nalu(nalu, tile)
+
+        def set_params(self, *args):
+            if codec != "h264":
+                return super().set_params(*args)
+            with self._avc_order:
+                self._avc_epoch += 1
+                return super().set_params(*args)
+
+        def restart(self):
+            if codec != "h264":
+                return super().restart()
+            with self._avc_order:
+                self._avc_epoch += 1
+                return super().restart()
+
+        def close(self):
+            if codec == "h264":
+                self._avc_stop.set()
+                self._avc_worker.join(timeout=3)
+                if self._avc_worker.is_alive():
+                    raise RuntimeError("native AVC worker is still using the codec")
+            return super().close()
+
+        @property
+        def decode_queue_depth(self):
+            return (
+                self._avc_queue.qsize()
+                if codec == "h264"
+                else super().decode_queue_depth
+            )
+
+        @property
+        def decode_queue_cap(self):
+            return (
+                self._avc_queue.maxsize if codec == "h264" else super().decode_queue_cap
+            )
 
         def _publish_frame(self, frame):
             frame.decode_submit_ns = int(

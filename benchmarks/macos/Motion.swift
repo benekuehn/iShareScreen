@@ -6,13 +6,15 @@ final class MotionDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let seconds = min(600, max(1, Double(CommandLine.arguments.dropFirst().first ?? "60") ?? 60))
+        let duration = Int(seconds)
         guard let screen = NSScreen.screens.max(by: {
             $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
         }) else { NSApp.terminate(nil); return }
         let window = NSWindow(contentRect: screen.visibleFrame,
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        window.title = "iShareScreen synthetic motion — closes automatically after 60 seconds"
+        window.title = "iShareScreen synthetic motion — closes automatically after \(duration) seconds"
         window.isReleasedWhenClosed = false
         let view = NSView(frame: NSRect(origin: .zero, size: screen.visibleFrame.size))
         view.wantsLayer = true
@@ -38,7 +40,7 @@ final class MotionDelegate: NSObject, NSApplicationDelegate {
             animation.timingFunction = CAMediaTimingFunction(name: .linear)
             bar.add(animation, forKey: "motion")
         }
-        let label = NSTextField(labelWithString: "Synthetic motion test • GPU decode / presentation benchmark\nClose this window to stop. It exits automatically after 60 seconds.")
+        let label = NSTextField(labelWithString: "Synthetic motion test • GPU decode / presentation benchmark\nClose this window to stop. It exits automatically after \(duration) seconds.")
         label.font = .systemFont(ofSize: 25, weight: .semibold)
         label.textColor = .white
         label.backgroundColor = .black
@@ -50,7 +52,7 @@ final class MotionDelegate: NSObject, NSApplicationDelegate {
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        Timer.scheduledTimer(timeInterval: 60, target: self,
+        Timer.scheduledTimer(timeInterval: seconds, target: self,
                              selector: #selector(finish), userInfo: nil, repeats: false)
     }
 
