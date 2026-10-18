@@ -21,6 +21,16 @@ most premature surface replacement. A longer motion run still developed HEVC
 reference errors and recovery pauses. Sustained 4K60 and actual display
 presentation remain unverified; passing unit tests does not establish either.
 
+After feedback/receive-worker changes, a continuous-motion HEVC trial on the M1
+host and Intel Linux viewer collected 35 consecutive five-second intervals:
+assembled picture AUs averaged 57.07 fps; clean decoder output and swap
+submissions both averaged 56.74 fps (submission range 54.4–58.0 fps). The native
+receive buffer reported zero drops. Reference errors still occurred, and swap
+submission is not proof of physical presentation. This is progress toward
+sustained 4K60, not a passing 4K60 acceptance test. Both alternate H.264 and
+two-quality-tier offers were compared; the default remains single-picture HEVC
+with one quality tier.
+
 The default native offer requests one HEVC 4:4:4 picture per frame, avoiding the
 cross-tile reference structure of Apple's four-tile stream. Single-picture
 HEVC omits DONL; the client detects that layout from aggregation packet lengths
