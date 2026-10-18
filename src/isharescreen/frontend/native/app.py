@@ -110,8 +110,10 @@ def run(config, *, auto_quit_secs=0, **_unused):
             sink.stop()
         raise
     from .render_loop import RenderLoop
+    from .presentation import Presentation
 
-    render = RenderLoop(window, session, Renderer)
+    presentation = Presentation.create(window)
+    render = RenderLoop(window, session, Renderer, presentation=presentation)
     buttons = 0
     position = (0, 0)
 
@@ -225,6 +227,8 @@ def run(config, *, auto_quit_secs=0, **_unused):
             if render.error:
                 raise RuntimeError("Native render worker failed") from render.error
             glfw.poll_events()
+            if presentation:
+                presentation.pump()
             render.update_view(
                 *glfw.get_framebuffer_size(window),
                 visible=not glfw.get_window_attrib(window, glfw.ICONIFIED),
@@ -272,6 +276,8 @@ def run(config, *, auto_quit_secs=0, **_unused):
             # thread; process teardown releases its sockets and GPU resources.
             log.error("GPU worker did not stop; terminating the viewer")
             os._exit(1)
+        if presentation:
+            presentation.close()
         session.close()
         if sink:
             sink.stop()

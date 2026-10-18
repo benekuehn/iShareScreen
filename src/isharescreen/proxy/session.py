@@ -477,6 +477,7 @@ class Session:
         self._video_receiver_stats: dict[int, ReceptionStats] = {}
         self._last_receiver_reports: dict[int, dict] = {}
         self.video_access_units = 0
+        self.presentation_stats = None
         self._roc: dict[int, int] = {}
         self._nack_pending: dict[int, set[int]] = defaultdict(set)
         # Cumulative packet-loss tracking. Lets consumers report a
@@ -1695,6 +1696,7 @@ class Session:
         self._video_receiver_stats = {}
         self._last_receiver_reports = {}
         self.video_access_units = 0
+        self.presentation_stats = None
         self._roc = {}
         self._nack_pending = defaultdict(set)
         self._server_sr = {}
@@ -4057,6 +4059,7 @@ class Session:
                 ],
                 "loss_total": loss_total,
                 "rtcp_receiver": self._last_receiver_reports,
+                "presentation": getattr(self, "presentation_stats", None),
                 "loss_unmapped": loss_unmapped,
                 "ssrc_groups": ssrc_groups,
                 "last_publish_age_s": round(last_publish_age, 2),

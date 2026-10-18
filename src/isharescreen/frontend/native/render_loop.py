@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import threading
 import time
@@ -22,10 +23,11 @@ def percentile(values, p=0.95):
 
 
 class RenderLoop:
-    def __init__(self, window, session, renderer_factory):
+    def __init__(self, window, session, renderer_factory, presentation=None):
         self.window = window
         self.session = session
         self.renderer_factory = renderer_factory
+        self.presentation = presentation
         self.stop_event = threading.Event()
         self.viewport = (*glfw.get_framebuffer_size(window), True, 0)
         self.error = None
@@ -62,6 +64,7 @@ class RenderLoop:
             last_clean = sum(getattr(self.session._decoder, "clean_counts", []))
             last_assembled = getattr(self.session, "video_access_units", 0)
             presents = uploads = 0
+            presentation_seq = 0
             last_surface_stats = {}
             compose_times, swap_times = [], []
             output_ages, ready_delays, submit_ages = [], [], []
@@ -81,7 +84,9 @@ class RenderLoop:
                     slot_height = 0
                     pending.clear()
                 dirty = False
-                for ti in range(self.session.num_tiles):
+                present_frame = None
+                can_render = self.presentation is None or self.presentation.can_submit()
+                for ti in range(self.session.num_tiles if can_render else 0):
                     frame = self.session.get_frame(ti)
                     frames = pending[ti]
                     if frame is not None:
@@ -114,18 +119,26 @@ class RenderLoop:
                     if renderer.upload(frame, ti, slot_height):
                         uploads += 1
                         dirty = True
+                        present_frame = frame
                     compose_times.append((time.monotonic() - started) * 1000)
-                if renderer and (dirty or revision != last_redraw):
+                if renderer and can_render and (dirty or revision != last_redraw):
                     renderer.draw(width, height)
+                    if self.presentation and dirty:
+                        presentation_seq += 1
+                        self.presentation.request(presentation_seq, present_frame)
                     started = time.monotonic()
                     glfw.swap_buffers(self.window)
                     swap_times.append((time.monotonic() - started) * 1000)
                     presents += 1
                     last_redraw = revision
                 else:
-                    self.session.wait_for_fresh_tile(0.004)
+                    self.session.wait_for_fresh_tile(0.004 if can_render else 0.001)
                 elapsed = time.monotonic() - profile_started
                 if elapsed >= 5:
+                    if self.presentation:
+                        stats = self.presentation.profile(elapsed)
+                        self.session.presentation_stats = stats
+                        log.info("native presentation: %s", json.dumps(stats))
                     decoded = sum(self.session._decoder.good_counts)
                     clean = sum(getattr(self.session._decoder, "clean_counts", []))
                     assembled = getattr(self.session, "video_access_units", 0)

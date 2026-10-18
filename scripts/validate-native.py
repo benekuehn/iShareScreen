@@ -2,8 +2,9 @@
 """Offline GPU validation. Readback is used only here, never in the viewer.
 
 Input: an Annex-B HEVC 4:4:4 stream, e.g. the command in native/README.md.
-Reports completed decode + composition + presentation time (glFinish), rather
+Reports completed decode + composition + GPU draw time (glFinish), rather
 than measuring only asynchronous GL submission. No remote desktop required.
+This does not measure compositor presentation or display scanout.
 """
 
 import argparse

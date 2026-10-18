@@ -19,7 +19,7 @@ Status: experimental. A completion-wait trial brought 4K submission throughput
 close to decoder output (about 56–58 fps in short motion intervals), eliminating
 most premature surface replacement. A longer motion run still developed HEVC
 reference errors and recovery pauses. Sustained 4K60 and actual display
-presentation remain unverified; passing unit tests does not establish either.
+presentation remain acceptance requirements; passing unit tests does not establish either.
 
 After feedback/receive-worker changes, a continuous-motion HEVC trial on the M1
 host and Intel Linux viewer collected 35 consecutive five-second intervals:
@@ -30,6 +30,16 @@ submission is not proof of physical presentation. This is progress toward
 sustained 4K60, not a passing 4K60 acceptance test. Both alternate H.264 and
 two-quality-tier offers were compared; the default remains single-picture HEVC
 with one quality tier.
+
+Wayland presentation feedback exposed a gap between submission and display:
+an unpaced continuous-motion sample (10 five-second intervals) averaged
+54.33 submitted fps but 45.86 compositor-confirmed displayed fps, with 422
+discarded updates. Experimental frame-callback pacing reduced discards in
+steady intervals, but the full 26-interval sample averaged only 47.70 displayed
+fps, included stalls, and felt worse to the user. These runs were not a
+controlled A/B comparison: visibility and decoder recovery affected results.
+Pacing is therefore opt-in and remains disabled by default. Presentation
+feedback is measurement infrastructure, not evidence of a 4K60 improvement.
 
 The default native offer requests one HEVC 4:4:4 picture per frame, avoiding the
 cross-tile reference structure of Apple's four-tile stream. Single-picture
@@ -50,11 +60,12 @@ completeness and decoder error signals remain active.
 ## Build on Linux
 
 Requirements: Rust/Cargo supporting edition 2024, a C compiler, pkg-config,
-FFmpeg development libraries, libva, EGL and GLES3. The runtime also requires
+FFmpeg development libraries, libva, EGL, GLES3, Wayland client libraries,
+`wayland-scanner` and the `wayland-protocols` XML files. The runtime also requires
 a VAAPI driver supporting the selected codec, a usable render device and
 `EGL_EXT_image_dma_buf_import` / `GL_OES_EGL_image_external_essl3`.
 
-On Arch, the build packages are `rust base-devel pkgconf ffmpeg libva libglvnd`.
+On Arch, the build packages are `rust base-devel pkgconf ffmpeg libva libglvnd wayland wayland-protocols`.
 Install the appropriate GPU driver separately; Intel GPUs commonly use
 `intel-media-driver`. GPU support must be confirmed by a real decode, not just
 an advertised profile.
@@ -101,6 +112,7 @@ Optional environment variables:
 | `ISS_SINGLE_VIDEO_STREAM=0` | Restore the extra host quality tier; native defaults to one stream. |
 | `ISS_NATIVE_SYNC_DECODE=0` | Compare asynchronous GPU output; the current trial waits for completion on the decoder worker before publishing. |
 | `ISS_VIDEO_RTCP_MUX=0` | Compare legacy video feedback on port 5900; native sends video RTCP on video port 5901. |
+| `ISS_NATIVE_PRESENT_PACING=1` | Opt into experimental frame-callback pacing. Default off after a user-reported responsiveness regression. |
 
 `SIGUSR1` dumps Python thread stacks for a stalled native viewer. The GUI logs
 the child's exit status or signal. Remote desktop pixels, packet captures,
@@ -123,7 +135,7 @@ scripts/build-on-mini.sh mini /Users/your-user/Work/iShareScreen-performance
 The script syncs source, runs Rust tests and a release build remotely, then
 downloads the shared library. It excludes Git metadata, local state, virtual
 environments and build output. It never transfers passwords. Provisioning an
-Arch build container requires `rust ffmpeg libva libglvnd pkgconf` plus the
+Arch build container requires `rust ffmpeg libva libglvnd pkgconf wayland wayland-protocols` plus the
 compiler toolchain from `base-devel`. Python tests additionally need the project
 dependencies; a test venv can be retained in the container.
 
@@ -178,8 +190,12 @@ skips stale presentation while compressed references continue decoding.
 60 fps permits 16.67 ms between distinct displayed frames; 120 fps permits
 8.33 ms. Pipeline stages overlap, so total frame latency is a separate budget.
 The native profile reports **submitted_fps**, not confirmed display FPS, and
-**decoder_output_fps**, not GPU completion rate. Wayland presentation feedback
-is still needed to verify physical presentation. Duplicating an unchanged frame
+**decoder_output_fps**, not GPU completion rate. On Wayland, a separate
+`native presentation` profile reports compositor-confirmed displayed FPS,
+discarded updates, presentation gaps, and client timestamps to presentation.
+The feedback flags and clock ID are recorded: cross-clock latency subtraction
+is never performed. Unavailable feedback is reported explicitly; other platforms
+continue measuring submissions only. Duplicating an unchanged frame
 must not inflate these measurements.
 `clean_frame_fps` comes from each backend's clean-frame counter: HEVC counts
 clean decoder output; AVC counts clean frames evaluated by its consumer. It
@@ -197,6 +213,25 @@ Observation timestamps include scheduling delay; they are not exact hardware
 completion timestamps. An unsupported readiness query uses synchronized upload
 without inventing a completion timestamp. None of these measure host capture,
 network transit or monitor scanout.
+
+Wayland callbacks use a private event queue, pumped after GLFW events on main.
+Rendering requests feedback only for new video content before swapping. A
+separate optional frame-ready callback paces drawing while allowing multiple commits
+to remain in the presentation pipeline; waiting for actual presentation would
+serialize that pipeline. After 250 ms a bounded retry can proceed if the frame
+callback stalls. Neither the event
+thread nor the packet/decoder workers wait for presentation. Pending feedback
+objects (256) and completed event records (2,048) are bounded, with overflow
+reported. The render worker stops before proxies and the private queue are
+freed, and all observer objects are freed before GLFW destroys its display.
+Pacing is disabled by default: despite reducing compositor discards in steady
+intervals, the first live trial included stalls and felt worse to the user.
+Display timing remains enabled independently of pacing.
+
+Run `.venv/bin/python scripts/validate-presentation.py` for a short visible
+feedback/cleanup check without a remote desktop. It confirms all 20 synthetic
+commits receive presentation/discard outcomes and also exercises destruction
+with pending feedback; it is not a 4K60 performance acceptance test.
 
 The temporary macOS motion benchmark provides continuous changes and exits
 automatically. Run `benchmarks/macos/script/build_and_run.sh --verify 180`

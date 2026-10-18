@@ -64,6 +64,17 @@ def library():
         "iss_udp_dropped": ([C.c_void_p], C.c_uint64),
         "iss_udp_free": ([C.c_void_p], None),
         "iss_udp_depth": ([C.c_void_p], C.c_size_t),
+        "iss_presentation_new": ([C.c_void_p, C.c_void_p], C.c_void_p),
+        "iss_presentation_free": ([C.c_void_p], None),
+        "iss_presentation_request": (
+            [C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint64],
+            C.c_int,
+        ),
+        "iss_presentation_pump": ([C.c_void_p], C.c_int),
+        "iss_presentation_read": ([C.c_void_p, C.c_void_p, C.c_size_t], C.c_size_t),
+        "iss_presentation_clock": ([C.c_void_p], C.c_int),
+        "iss_presentation_dropped": ([C.c_void_p], C.c_uint64),
+        "iss_presentation_frame_pending": ([C.c_void_p], C.c_size_t),
     }
     for name, (args, result) in signatures.items():
         fn = getattr(lib, name)

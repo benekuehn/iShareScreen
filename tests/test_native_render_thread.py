@@ -92,3 +92,40 @@ def test_swap_wait_does_not_block_view_updates_and_cleanup_stays_on_gpu_thread(
     assert render.error is None
     assert ("close", render.thread.ident, None) in calls
     assert calls[0] == ("context", threading.get_ident(), None)
+
+
+def test_pending_presentation_does_not_consume_frames_or_block_main(monkeypatch):
+    waiting = threading.Event()
+    monkeypatch.setattr(render_loop.glfw, "get_framebuffer_size", lambda _: (1280, 720))
+    monkeypatch.setattr(render_loop.glfw, "make_context_current", lambda _: None)
+    monkeypatch.setattr(render_loop.glfw, "swap_interval", lambda _: None)
+
+    def unexpected(*_):
+        raise AssertionError(
+            "pending presentation must retain completed frames for later"
+        )
+
+    def wait(_):
+        waiting.set()
+        threading.Event().wait(0.001)
+
+    session = S(
+        is_connected=True,
+        canvas_dims=(3840, 2160),
+        num_tiles=1,
+        _decoder=S(good_counts=[1], decode_queue_depth=0),
+        get_frame=unexpected,
+        wait_for_fresh_tile=wait,
+    )
+    observer = S(can_submit=lambda: False)
+    render = render_loop.RenderLoop(
+        "window", session, unexpected, presentation=observer
+    )
+    render.start()
+    try:
+        assert waiting.wait(2)
+        render.update_view(1920, 1080, redraw=True)
+        assert render.viewport[:2] == (1920, 1080)
+    finally:
+        assert render.stop()
+    assert render.error is None
