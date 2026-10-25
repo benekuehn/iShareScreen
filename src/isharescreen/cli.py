@@ -2,20 +2,20 @@
 
 Modes:
 
-  ``iss [flags]``
-      Default. Opens the native desktop viewer (wgpu + glfw) and streams
-      the host Mac's screen at lowest latency, hardware HEVC RExt 4:4:4
-      decode where the platform supports it.
+  ``iss connect [flags]``
+      Connect directly from the command line. Bare ``iss`` reuses ``--last``.
+      ``--preset native-4k`` selects the Linux GPU viewer with 4K backing.
+      The optional browser connection form is ``iss gui``.
 
   ``iss --headless [flags]``
       Protocol smoke test: connect, decode for ``--auto-quit-secs`` seconds,
       print stats, exit. No window. Useful for verifying the decoder
       against a host without UI plumbing.
 
-Password input, in order of precedence:
-  ``--password-stdin`` (read the first line of stdin — the
-  recommended unattended path: ``echo "$PW" | iss ... --password-stdin``).
-  Otherwise the connect prompt asks for it interactively via getpass.
+Password input: explicit stdin or a password-manager command, then the OS login
+keyring, then a masked terminal prompt. Noninteractive launches fail promptly
+when no credential exists. ``--remember-password`` saves to the keyring and
+persists the non-secret connection settings for subsequent ``iss`` launches.
 
 There is no ``-p`` / ``--password`` flag on purpose — anything in argv
 shows up in ``ps`` and shell history.
@@ -78,7 +78,10 @@ def _make_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  iss                                       # interactive prompt\n"
+            "  iss connect --last                        # saved settings + login keyring\n"
+            "  iss connect --last --preset native-4k\n"
+            "  iss connect --host mac.lan -u user --remember-password\n"
+            "  iss gui                                   # optional browser form\n"
             "  iss --host mac.lan -u user                # asks for password\n"
             "  echo \"$PW\" | iss --host mac.lan -u user --password-stdin\n"
             "  iss --host mac.lan -u user --password-stdin < pw.txt\n"
@@ -90,14 +93,25 @@ def _make_parser() -> argparse.ArgumentParser:
     g = p.add_argument_group("connection")
     g.add_argument("--host", required=False, help="hostname or IP of the Mac")
     g.add_argument("-u", "--user", required=False, help="username")
+    g.add_argument("--last", action="store_true", help="reuse the last saved connection (no browser form)")
+    g.add_argument("--preset", choices=("native-4k",), help="native GPU HEVC, 3840x2160 backing at 200%% scale")
     # No `--password PASSWORD` flag on purpose: anything passed on the
     # command line shows up in `ps` and gets recorded in shell history.
     # For unattended use, pipe via --password-stdin
     # (`echo "$PW" | iss ... --password-stdin`); for interactive use,
     # let the connect prompt handle it via getpass.
-    g.add_argument(
+    passwords = g.add_mutually_exclusive_group()
+    passwords.add_argument(
         "--password-stdin", action="store_true",
         help="read password from the first line of stdin",
+    )
+    passwords.add_argument(
+        "--password-command", metavar="COMMAND",
+        help="read one password line from a password manager command (no shell)",
+    )
+    g.add_argument(
+        "--remember-password", action="store_true",
+        help="save the supplied password in the OS login keyring for future CLI launches",
     )
     g.add_argument("--port", type=int, default=5900, help="TCP port (default 5900)")
     g.add_argument(
@@ -272,6 +286,46 @@ def _make_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _parse_args(argv):
+    parser = _make_parser()
+    selected = parser.parse_args(argv)
+    if selected.last:
+        from .tui.storage import load_last
+        saved = load_last()
+        if saved is None:
+            parser.error("no saved connection; supply --host and --user")
+        defaults = {
+            key: getattr(saved, key) for key in (
+                "host", "user", "frontend", "hidpi", "decoder", "audio", "curtain",
+                "hdr", "share_console", "alt_session", "port", "codec", "auth",
+            )
+        }
+        defaults["dynamic"] = saved.dynamic_resolution
+        # Saved form geometry is backing pixels; the protocol CLI takes points.
+        advertise = saved.advertise
+        if advertise and advertise.lower() != "auto" and not selected.preset and not selected.advertise:
+            try:
+                width, height = map(int, advertise.lower().split("x", 1))
+                scale = {"on": 2.0, "off": 1.0, "auto": 1.0}.get(saved.hidpi)
+                if scale is None:
+                    scale = float(saved.hidpi)
+                if not 1 <= scale <= 4:
+                    raise ValueError()
+                width, height = (max(2, int(round(n / scale / 2)) * 2) for n in (width, height))
+                advertise = f"{width}x{height}@{scale}"
+            except (ValueError, ZeroDivisionError):
+                parser.error("saved display settings are invalid; use --preset native-4k")
+        defaults["advertise"] = advertise
+        parser.set_defaults(**defaults)
+    if selected.preset == "native-4k":
+        parser.set_defaults(
+            frontend="native", codec="hevc", decoder="auto",
+            advertise="1920x1080@2", hidpi="2", dynamic=False,
+        )
+    # Explicit flags override both saved settings and preset defaults.
+    return parser.parse_args(argv)
+
+
 # ── value parsing ────────────────────────────────────────────────────
 
 def _parse_advertise(spec: Optional[str]) -> Optional[AdvertiseDims]:
@@ -305,6 +359,15 @@ def _password_from_args(args: argparse.Namespace) -> Optional[str]:
         if not line:
             raise SystemExit("--password-stdin: no input on stdin")
         return line.rstrip("\r\n")
+    from .credentials import load_password, password_from_command
+    if args.password_command:
+        return password_from_command(args.password_command)
+    password = load_password(args.host, args.user, args.port) if args.host and args.user else None
+    if password:
+        return password
+    if args.host and args.user and sys.stdin.isatty():
+        import getpass
+        return getpass.getpass("Mac password: ")
     return None
 
 
@@ -391,14 +454,34 @@ def _build_session_config(args: argparse.Namespace) -> SessionConfig:
     missing = [
         label for label, value in
         (("--host", args.host), ("-u/--user", args.user),
-         ("--password-stdin", cli_password))
+         ("password (keyring, --password-stdin or --password-command)", cli_password))
         if not value
     ]
     if missing:
         raise SystemExit(
             "missing required arg(s): " + ", ".join(missing) +
-            " (run plain `iss` for the interactive connect GUI)"
+            ". For unattended access, save a password once with "
+            "`iss connect --last --password-stdin --remember-password`, "
+            "or supply --password-command. No browser connection is required."
         )
+    if args.remember_password:
+        from .credentials import store_password
+        store_password(args.host, args.user, args.port, cli_password)
+        from .tui.storage import ConnectFormValues, save_last
+        scale = cli_advertise.hidpi_scale if cli_advertise else None
+        backing = (
+            f"{round(cli_advertise.width * scale)}x{round(cli_advertise.height * scale)}"
+            if cli_advertise else "auto"
+        )
+        save_last(ConnectFormValues(
+            host=args.host, user=args.user, password="", advertise=backing,
+            port=args.port, codec=args.codec, auth=args.auth,
+            hidpi=str(scale) if scale is not None else args.hidpi,
+            frontend=args.frontend, decoder=args.decoder, audio=args.audio,
+            curtain=args.curtain, hdr=args.hdr, share_console=args.share_console,
+            alt_session=args.alt_session, dynamic_resolution=dynamic_resolution,
+        ))
+        log.info("Password saved in the OS login keyring")
     return SessionConfig(
         host=args.host, port=args.port,
         username=args.user, password=cli_password or "",
@@ -542,7 +625,10 @@ def _run_frontend(config: SessionConfig, args: argparse.Namespace) -> int:
 # ── entry point ──────────────────────────────────────────────────────
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _make_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["connect"]:
+        argv = argv[1:]
+    args = _parse_args(argv or ["--last"])
     _setup_logging(args)
     if args.list_decoders:
         from .proxy.media import registry

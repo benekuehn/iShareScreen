@@ -94,17 +94,47 @@ UDP 5900–5901 inbound.
 ## Usage
 
 ```sh
-iss
+# One-time setup: prompts for the Mac password without echoing it.
+iss connect --host mac.local -u me --preset native-4k --remember-password
+
+# Subsequent launches, including unattended launches by a development agent:
+iss connect --last
+# Bare `iss` also reconnects using the saved settings and login keyring.
 ```
 
-Opens the terminal UI: a connect form for host / username / password
+The CLI connects directly; the optional browser connection form is `iss gui`.
+On Linux, `--remember-password` uses `secret-tool` and an unlocked Secret
+Service login keyring (`libsecret` on Arch, `libsecret-tools` on Debian/Ubuntu).
+It also saves the connection settings, without the password. The password
+travels to the keyring through stdin, never a command argument or settings file.
+Supplying this option stores the entered credential before connection; it does
+not verify that the Mac accepts it. Keyring entries are scoped to host, user
+and port. Other platforms can use stdin or a password-manager command.
+
+Explicit flags override saved settings and the preset. `native-4k` selects
+the Linux VAAPI/EGL HEVC viewer at 3840×2160 backing with a 1920×1080 logical
+desktop; it does not guarantee sustained 60 fps. For this checkout, replace
+`iss` with `./launch-performance.sh` to use its venv and saved settings.
+
+For an existing password manager, use a command that prints one password line:
+
+```sh
+iss connect --last --password-command 'pass show remote/mini'
+```
+
+The command is executed directly, without a shell. Explicit stdin or password
+command takes precedence over the login keyring. Interactive terminals prompt
+if no credential exists; unattended launches fail with an actionable error.
+After one-time keyring setup, an agent can run, stop and rerun the same CLI
+without a browser form or further password entry while that keyring is unlocked.
+
+The browser form accepts host / username / password
 (masked) and resolution, then a live session view with per-tile fps and
 loss, throughput, UDP queue health, and a log tail. The actual screen
 streams in a separate window. Last-session values pre-fill the form on
-the next launch; passwords are never persisted.
+the next launch; this form does not save passwords.
 
-Any flag accepted by `iss --headless` also pre-fills the form, so
-launchers can do:
+The existing streaming flags also work directly, for example:
 
 ```sh
 iss --host mac.local -u me --advertise 1920x1080 --no-curtain
