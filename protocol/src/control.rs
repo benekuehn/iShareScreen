@@ -67,7 +67,7 @@ impl Cipher {
         Ok(out)
     }
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
-        if ciphertext.len() < 32 || ciphertext.len() > 65535 || ciphertext.len() % 16 != 0 {
+        if ciphertext.len() < 16 || ciphertext.len() > 65535 || ciphertext.len() % 16 != 0 {
             return Err(Error::InvalidPacket);
         }
         if self.receive_counter > u32::MAX as u64 {
@@ -84,6 +84,11 @@ impl Cipher {
         }
         let start = self.receive_counter;
         self.receive_counter += 1;
+        // Block-aligned rejected records still consume the CBC chain. Never
+        // publish an undersized record's unauthenticated plaintext.
+        if plain.len() < 20 {
+            return Err(Error::Authentication);
+        }
         let end = plain.len() - 20;
         for counter in start.saturating_sub(1)..(start + 6).min(u32::MAX as u64 + 1) {
             let mut mac = Sha1::new();
@@ -99,5 +104,28 @@ impl Cipher {
             }
         }
         Err(Error::Authentication)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejected_short_record_consumes_chaining_without_publishing_plaintext() {
+        let mut sender = Cipher::new(&[2; 36], &[3; 16]).unwrap();
+        let mut receiver = Cipher::new(&[2; 36], &[3; 16]).unwrap();
+        let mut short = [0u8; 16];
+        for (byte, iv) in short.iter_mut().zip(sender.send_iv.iter()) {
+            *byte ^= iv;
+        }
+        sender.aes.encrypt_block((&mut short).into());
+        sender.send_iv.copy_from_slice(&short);
+        sender.send_counter += 1;
+        assert_eq!(receiver.decrypt(&short), Err(Error::Authentication));
+        let next = sender.encrypt(b"valid after short record").unwrap();
+        assert_eq!(
+            receiver.decrypt(&next[2..]).unwrap(),
+            b"valid after short record"
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Native executable migration checkpoint. Auth-check opens no viewer and
 //! performs no Python subprocess calls. Streaming/session UI follows next.
 use isharescreen_protocol::auth;
+mod wire;
 use serde_json::Value;
 use std::io::{self, IsTerminal, Read};
 use std::process::{Command, Stdio};
@@ -64,12 +65,13 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "iss-native --auth-check --last [--host HOST] [--user USER] [--port PORT] [--auth srp|nonsrp] [--password-stdin]\n\nNative migration checkpoint: authenticates without Python, then disconnects.\nThe standalone streaming viewer is still being ported."
+            "iss-native (--auth-check | --negotiate-check) --last [--host HOST] [--user USER] [--port PORT] [--auth srp|nonsrp] [--password-stdin]\n\nNative migration checkpoints: authenticate or negotiate the media session\nwithout Python, then disconnect. The standalone viewer is still being ported."
         );
         return Ok(());
     }
     let mut last = false;
     let mut check = false;
+    let mut negotiate = false;
     let mut stdin = false;
     let mut overrides = std::collections::HashMap::new();
     let mut index = 0;
@@ -77,6 +79,7 @@ fn run() -> Result<()> {
         match args[index].as_str() {
             "--last" => last = true,
             "--auth-check" => check = true,
+            "--negotiate-check" => negotiate = true,
             "--password-stdin" => stdin = true,
             "--host" | "--user" | "--port" | "--auth" => {
                 let key = args[index].trim_start_matches("--").to_owned();
@@ -87,8 +90,8 @@ fn run() -> Result<()> {
         }
         index += 1;
     }
-    if !check {
-        return Err("streaming migration is not finished; use --auth-check for the native authentication checkpoint".into());
+    if check == negotiate {
+        return Err("choose --auth-check or --negotiate-check; standalone presentation is still being ported".into());
     }
     let mut settings = if last {
         let base = std::env::var_os("XDG_STATE_HOME")
@@ -136,8 +139,38 @@ fn run() -> Result<()> {
     let warmup = auth::open(host, port)?;
     drop(warmup);
     std::thread::sleep(Duration::from_millis(1400));
-    let (_stream, _key) = auth::connect(host, port, user, &password, mode == "srp")?;
-    println!("Native {mode} authentication succeeded; checkpoint complete (no Python process)");
+    let (stream, key) = auth::connect(host, port, user, &password, mode == "srp")?;
+    if negotiate {
+        let scale = match settings["hidpi"].as_str().unwrap_or("2") {
+            "on" => 2.0,
+            "off" | "auto" => 1.0,
+            value => value.parse::<f64>()?,
+        };
+        let backing = settings["advertise"]
+            .as_str()
+            .filter(|value| *value != "auto")
+            .unwrap_or("3840x2160");
+        let (width, height) = backing
+            .split_once('x')
+            .ok_or("invalid saved display geometry")?;
+        let width = (width.parse::<u32>()? as f64 / scale).round() as u32;
+        let height = (height.parse::<u32>()? as f64 / scale).round() as u32;
+        let result = wire::negotiate(
+            stream,
+            &*key,
+            width,
+            height,
+            scale,
+            settings["curtain"].as_bool().unwrap_or(true),
+            false,
+        )?;
+        println!(
+            "Native negotiation succeeded: {}x{} canvas (no Python process; no viewer opened)",
+            result.width, result.height
+        );
+    } else {
+        println!("Native {mode} authentication succeeded; checkpoint complete (no Python process)");
+    }
     Ok(())
 }
 fn main() {
