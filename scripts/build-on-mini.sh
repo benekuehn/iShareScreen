@@ -11,6 +11,7 @@ if [[ $build_dir != /* || $build_dir == *[!a-zA-Z0-9_./-]* ]]; then
   exit 2
 fi
 app_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ssh "$build_host" 'export PATH=/opt/homebrew/bin:$PATH; if ! container list --quiet | grep -Fxq isharescreen-build; then container start isharescreen-build; fi'
 rsync -az --exclude=.git --exclude='.venv*' --exclude=target \
   --exclude=local-state --exclude=__pycache__ --exclude='*.log' \
   "$app_dir/" "$build_host:$build_dir/"
