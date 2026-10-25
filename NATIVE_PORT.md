@@ -67,11 +67,10 @@ cc client/tests/audio_roundtrip.c client/audio.c -lfdk-aac -ldl -lm -o /tmp/iss-
 /tmp/iss-audio-check
 ```
 
-The mini builds x86 Linux artifacts in `isharescreen-build`. The script copies
-and starts that existing build container when needed. Once the build finishes,
+The mini builds x86 Linux artifacts in `isharescreen-build`. The script starts
+that existing build container when needed. Once the build finishes,
 it is safe to stop the container to free the mini's memory for screen capture.
-The script copies
-its native GLFW runtime beside the executable; the launcher sets the search
+It copies the native GLFW runtime beside the executable; the launcher sets the search
 path. Normal installations can provide GLFW via their package manager instead.
 Runtime dependencies include system FFmpeg/VAAPI/EGL, a supported VAAPI driver,
 OpenSSL, libfdk-aac, PortAudio and `secret-tool`. Native session code does not
