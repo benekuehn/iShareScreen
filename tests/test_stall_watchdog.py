@@ -96,6 +96,21 @@ def test_apple_idle_no_packets_does_nothing():
     assert s.fir_calls == 0
 
 
+def test_static_startup_picture_does_not_trigger_fir_or_decoder_rebuild():
+    # Burst reception precedes _track_seq: no post-burst packet means zero,
+    # not evidence that a stalled decoder is still receiving compressed data.
+    for gap in (4.0, 20.0, 120.0):
+        s = _make_session(gap=gap)
+        s._last_video_pkt_t = 0.0
+        s._check_stall()
+        assert s._decoder.restart_calls == 0
+        assert s.fir_calls == 0
+        # Real incoming video must re-enable the recovery watchdog.
+        s._last_video_pkt_t = time.monotonic()
+        s._check_stall()
+        assert s.fir_calls >= 1
+
+
 def test_pathB_stuck_tile_with_loss_fir_only():
     # one tile stuck (bad_streak high) but small gap so only Path B runs; loss
     # active ⇒ FIR storm, no flush.

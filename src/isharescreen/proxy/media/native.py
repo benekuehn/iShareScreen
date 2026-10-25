@@ -75,6 +75,7 @@ def library():
         "iss_presentation_clock": ([C.c_void_p], C.c_int),
         "iss_presentation_dropped": ([C.c_void_p], C.c_uint64),
         "iss_presentation_frame_pending": ([C.c_void_p], C.c_size_t),
+        "iss_presentation_set_pacing": ([C.c_void_p, C.c_int], None),
     }
     for name, (args, result) in signatures.items():
         fn = getattr(lib, name)
@@ -150,6 +151,7 @@ class SurfaceFrame:
         self.gpu_surface = True
         self.decoder_output_ns = time.monotonic_ns()
         self.gpu_ready_observed_ns = None
+        self.presentation_selected = True
 
     @property
     def ready(self):
@@ -175,6 +177,7 @@ class NativeContext:
 
     def __init__(self, codec: str, extradata: bytes):
         self._lib = library()
+        self.activity = None
         self.generation = next(_GENERATIONS)
         self._handle = self._lib.iss_decoder_new(
             0 if codec == "h264" else 1,
@@ -196,7 +199,12 @@ class NativeContext:
                     raise RuntimeError(message.decode(errors="replace"))
                 return frames
             frame = SurfaceFrame(self._lib, handle)
-            if os.environ.get("ISS_NATIVE_SYNC_DECODE", "1") == "1":
+            activity = getattr(self, "activity", None)
+            selected = True
+            if activity is not None:
+                selected = activity.take_output()
+                frame.presentation_selected = selected
+            if selected and os.environ.get("ISS_NATIVE_SYNC_DECODE", "1") == "1":
                 # Wait on the decoder worker, never on GLFW's event thread.
                 # Bound in-flight GPU decode instead of replacing unfinished
                 # surfaces faster than the GPU can report them complete.
@@ -283,6 +291,7 @@ def make_decoder(codec, num_tiles, **kwargs):
             self._avc_epoch = 0
             self._avc_stop = threading.Event()
             self._avc_queue = queue.Queue(maxsize=128)
+            self._activity = None
             super().__init__(num_tiles, **options)
             self._avc_worker = None
             if codec == "h264":
@@ -372,10 +381,20 @@ def make_decoder(codec, num_tiles, **kwargs):
                 self._pts_submit_t.get(frame.pts, time.monotonic()) * 1e9
             )
             ti = self._pts_to_tile.get(frame.pts)
-            if ti is not None:
+            if ti is not None and getattr(frame, "presentation_selected", True):
                 with self._surface_lock:
+                    if self._activity is not None and self._activity.background:
+                        # A background preview needs one completed surface;
+                        # retaining four hidden 4K surfaces wastes GPU memory.
+                        self._surfaces[ti].superseded += len(self._surfaces[ti].frames)
+                        self._surfaces[ti].frames.clear()
                     self._surfaces[ti].add(frame)
             super()._publish_frame(frame)
+
+        def set_activity_budget(self, activity):
+            self._activity = activity
+            if isinstance(self._codec, NativeContext):
+                self._codec.activity = activity
 
         def get_frame(self, tile_idx):
             if codec == "h264":
@@ -405,10 +424,15 @@ def make_decoder(codec, num_tiles, **kwargs):
                 }
 
         def _try_hwaccel_locked(self, hw_type, extradata):
-            return NativeContext(codec, extradata) if hw_type == "vaapi" else None
+            return self._native_context(extradata) if hw_type == "vaapi" else None
 
         def _try_hwaccel(self, hw_type, extradata):
-            return NativeContext(codec, extradata) if hw_type == "vaapi" else None
+            return self._native_context(extradata) if hw_type == "vaapi" else None
+
+        def _native_context(self, extradata):
+            context = NativeContext(codec, extradata)
+            context.activity = self._activity
+            return context
 
         @staticmethod
         def _make_sw_context(extradata):

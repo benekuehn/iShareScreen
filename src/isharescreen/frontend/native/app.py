@@ -79,6 +79,8 @@ def run(config, *, auto_quit_secs=0, **_unused):
     faulthandler.enable()
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     os.environ["ISS_NATIVE_GPU"] = "1"
+    from .activity import ActivityBudget
+    activity = ActivityBudget.create()
     # Fixed 4K backing / Retina UI is the default for the experimental engine.
     if config.advertise is None:
         config = dataclasses.replace(
@@ -103,6 +105,8 @@ def run(config, *, auto_quit_secs=0, **_unused):
     # GLFW window.
     try:
         session.connect()
+        if activity:
+            session._decoder.set_activity_budget(activity)
         window = create_window(1280, 720)
     except BaseException:
         session.close()
@@ -113,7 +117,7 @@ def run(config, *, auto_quit_secs=0, **_unused):
     from .presentation import Presentation
 
     presentation = Presentation.create(window)
-    render = RenderLoop(window, session, Renderer, presentation=presentation)
+    render = RenderLoop(window, session, Renderer, presentation=presentation, activity=activity)
     buttons = 0
     position = (0, 0)
 
@@ -169,6 +173,10 @@ def run(config, *, auto_quit_secs=0, **_unused):
 
     def focus(_window, focused):
         nonlocal buttons
+        render.update_view(*glfw.get_framebuffer_size(window),
+                           visible=not glfw.get_window_attrib(window, glfw.ICONIFIED),
+                           focused=bool(focused))
+        log.info("native activity: window %s", "foreground" if focused else "background")
         if not focused:
             for ks in set(held.values()):
                 session.input.key_event(False, ks)
@@ -176,11 +184,18 @@ def run(config, *, auto_quit_secs=0, **_unused):
             buttons = 0
             session.input.pointer_event(0, *position)
 
-    glfw.set_cursor_pos_callback(window, pointer)
-    glfw.set_mouse_button_callback(window, mouse)
-    glfw.set_scroll_callback(window, scroll)
-    glfw.set_key_callback(window, key)
-    glfw.set_char_callback(window, text)
+    def with_activity(callback):
+        def handle(*args):
+            if activity:
+                activity.input()
+            return callback(*args)
+        return handle
+
+    glfw.set_cursor_pos_callback(window, with_activity(pointer))
+    glfw.set_mouse_button_callback(window, with_activity(mouse))
+    glfw.set_scroll_callback(window, with_activity(scroll))
+    glfw.set_key_callback(window, with_activity(key))
+    glfw.set_char_callback(window, with_activity(text))
     glfw.set_window_focus_callback(window, focus)
 
     def request_redraw(*_args):
@@ -232,6 +247,7 @@ def run(config, *, auto_quit_secs=0, **_unused):
             render.update_view(
                 *glfw.get_framebuffer_size(window),
                 visible=not glfw.get_window_attrib(window, glfw.ICONIFIED),
+                focused=bool(glfw.get_window_attrib(window, glfw.FOCUSED)),
             )
             with cursor_lock:
                 image = pending_cursor[0]
@@ -267,7 +283,10 @@ def run(config, *, auto_quit_secs=0, **_unused):
                         session.send_dynamic_resolution(rw, rh, hidpi_scale=scale)
                         last_resize = now
             # GLFW event dispatch and input never wait for GPU work.
-            time.sleep(0.002)
+            if activity:
+                glfw.wait_events_timeout(max(0.001, activity.event_wait()))
+            else:
+                time.sleep(0.002)
     finally:
         diagnostics_stop.set()
         if not render.stop():

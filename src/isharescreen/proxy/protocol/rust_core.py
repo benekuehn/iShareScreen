@@ -30,7 +30,7 @@ def library():
     except OSError as exc:
         raise RuntimeError("Rust protocol core is not built; run scripts/build-on-mini.sh or cargo build --release in protocol/") from exc
     lib.iss_protocol_abi_version.restype = C.c_uint32
-    if lib.iss_protocol_abi_version() != 1:
+    if lib.iss_protocol_abi_version() != 2:
         raise RuntimeError("Rust protocol ABI mismatch; rebuild protocol/")
     signatures = {
         "iss_crypto_new": ([C.c_int, C.c_void_p, C.c_size_t, C.c_void_p, C.c_size_t, C.c_uint32], C.c_void_p),
@@ -42,11 +42,17 @@ def library():
         "iss_hevc_reassemble": ([C.c_void_p, C.c_size_t, C.c_int, C.c_void_p, C.c_size_t], C.c_ssize_t),
         "iss_auth_connect": ([C.c_void_p, C.c_size_t, C.c_uint16, C.c_int, C.c_void_p, C.c_size_t, C.c_void_p, C.c_size_t, C.c_void_p], C.c_int),
         "iss_protocol_error": ([], C.c_char_p),
+        "iss_activity_new": ([C.c_uint32], C.c_void_p),
+        "iss_activity_window": ([C.c_void_p, C.c_int, C.c_int, C.c_uint64], None),
+        "iss_activity_input": ([C.c_void_p, C.c_uint64], None),
+        "iss_activity_tick": ([C.c_void_p, C.c_int, C.c_uint64], C.c_uint64),
+        "iss_activity_snapshot": ([C.c_void_p, C.c_uint64, C.c_void_p], None),
+        "iss_activity_free": ([C.c_void_p], None),
     }
     for name, (args, result) in signatures.items():
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = args, result
-    log.info("Rust protocol core active (ABI 1)")
+    log.info("Rust protocol core active (ABI 2)")
     return lib
 
 

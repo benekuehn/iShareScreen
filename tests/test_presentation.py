@@ -93,6 +93,7 @@ def test_pacing_waits_for_feedback_without_blocking_and_bounds_stalled_feedback(
             iss_presentation_clock=lambda _: time.CLOCK_MONOTONIC,
             iss_presentation_frame_pending=lambda _: pending[0],
             iss_presentation_request=lambda *_: 1,
+            iss_presentation_set_pacing=lambda *_: None,
         ),
         1,
     )

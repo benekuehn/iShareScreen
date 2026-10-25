@@ -97,6 +97,26 @@ def test_receive_waits_for_gpu_on_decoder_worker_before_publishing(monkeypatch):
     context.close()
 
 
+def test_background_samples_output_sync_but_retains_every_decoded_reference(monkeypatch):
+    monkeypatch.setenv("ISS_NATIVE_SYNC_DECODE", "1")
+    received = iter([11,12,13,None])
+    selected = iter([True,False,False])
+    waits = []
+    lib = S(
+        iss_decoder_receive=lambda _: next(received), iss_error=lambda: b"",
+        iss_frame_wait=lambda handle: waits.append(handle) or 0,
+        iss_decoder_free=lambda _: None,
+    )
+    monkeypatch.setattr(native, "SurfaceFrame", lambda *_: S(gpu_ready_observed_ns=None))
+    context = context_with(lib)
+    context.activity = S(take_output=lambda: next(selected))
+    frames = context._receive()
+    assert len(frames) == 3  # all decoder progress still reaches reference bookkeeping
+    assert waits == [11]    # only the sampled preview output needs synchronization
+    assert [frame.presentation_selected for frame in frames] == [True,False,False]
+    context.close()
+
+
 def test_native_probe_rejects_no_output_and_closes_context(monkeypatch):
     closed = []
     monkeypatch.setenv("ISS_NATIVE_GPU", "1")

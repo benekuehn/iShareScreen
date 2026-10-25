@@ -4070,6 +4070,7 @@ class Session:
                 "rtcp_receiver": self._last_receiver_reports,
                 "rtp_repair": self._rtp_repair.snapshot(),
                 "presentation": getattr(self, "presentation_stats", None),
+                "activity": getattr(self, "activity_stats", None),
                 "loss_unmapped": loss_unmapped,
                 "ssrc_groups": ssrc_groups,
                 "last_publish_age_s": round(last_publish_age, 2),
@@ -4187,10 +4188,8 @@ class Session:
         # keyframe_required stays populated so the next packet that
         # does arrive triggers a fresh FIR cycle naturally. (The armed
         # force-all escalation above is deliberately exempt — see there.)
-        if self._last_video_pkt_t > 0.0:
-            quiet_for = time.monotonic() - self._last_video_pkt_t
-            if quiet_for >= 1.5:
-                return
+        if self._video_is_quiet(time.monotonic()):
+            return
         # Browser-frontend suppression: the browser's own WebCodecs decoder is
         # the authoritative picture, and it reports when it's actively decoding a
         # GOOD frame ("ok" verdict → note_browser_healthy). While that's fresh,
@@ -4355,6 +4354,14 @@ class Session:
             self.num_tiles,
         )
 
+    def _video_is_quiet(self, now: float) -> bool:
+        # Startup video is consumed by the burst reader before _track_seq.
+        # A static desktop may send nothing after that picture, leaving the
+        # packet timestamp at zero. Treat the initial publication as the
+        # baseline instead of mistaking zero for an actively flowing stream.
+        baseline = self._last_video_pkt_t or getattr(self, "_last_publish_t", 0.0)
+        return baseline > 0.0 and now - baseline >= 1.5
+
     def _check_stall(self) -> None:
         """Decoder-stall recovery. Two failure modes:
 
@@ -4380,6 +4387,8 @@ class Session:
             return
         gap = time.monotonic() - self._last_publish_t
         now = time.monotonic()
+        if self._video_is_quiet(now):
+            return
 
         # Track whether packet loss is actively growing — the discriminator
         # for Path B's two stuck-tile failure modes. A broken-ref stall from
@@ -4433,13 +4442,6 @@ class Session:
         if gap > 15.0 and self._decoder is not None:
             last_restart = getattr(self, "_last_decoder_restart_t", 0.0)
             if now - last_restart >= 8.0:
-                # Same Apple-idle suppression as the 3 s path: if no
-                # packets are arriving, Apple isn't encoding, restart
-                # + FIR can't help. Wait for packets to resume.
-                quiet_for = (now - self._last_video_pkt_t
-                             if self._last_video_pkt_t > 0.0 else 0.0)
-                if quiet_for >= 1.5:
-                    return
                 self._last_decoder_restart_t = now
                 log.warning(
                     "decoder stuck %.1fs (long); restart decoder + FIR storm",
@@ -4454,16 +4456,6 @@ class Session:
         if gap > 3.0:
             last_fir = getattr(self, "_last_stall_fir_t", 0.0)
             if now - last_fir >= 1.5:
-                # Apple-idle suppression: if no video packet has
-                # arrived in the last 1.5 s, Apple's encoder has rate-
-                # controlled to silence on a static screen, not
-                # genuinely stuck. We don't have anything to FIR
-                # productively (Apple's encoder ISN'T encoding) — wait
-                # for it to wake on its own when content changes.
-                quiet_for = now - self._last_video_pkt_t
-                if (self._last_video_pkt_t > 0.0
-                        and quiet_for >= 1.5):
-                    return
                 self._last_stall_fir_t = now
                 # Defer to the gate if it's already actively trying to
                 # recover all tiles — piling on more FIRs only causes

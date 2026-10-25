@@ -119,6 +119,15 @@ the Linux VAAPI/EGL HEVC viewer at 3840×2160 backing with a 1920×1080 logical
 desktop; it does not guarantee sustained 60 fps. For this checkout, replace
 `iss` with `./launch-performance.sh` to use its venv and saved settings.
 
+The native viewer keeps its connection open when you switch away. Background
+windows render at up to 5 fps; focusing the window immediately restores the
+normal full-speed path. Minimized windows stop rendering and release the
+compositor surfaces. Idle windows wait for events rather than polling rapidly.
+Use `ISS_BACKGROUND_FPS=5` to change the background limit, or
+`ISS_ADAPTIVE_FPS=0` to disable this policy. This currently saves client
+presentation work; the Mac's capture rate is not controlled, and incoming
+reference frames still need decoding.
+
 For an existing password manager, use a command that prints one password line:
 
 ```sh

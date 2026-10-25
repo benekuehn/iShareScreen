@@ -119,6 +119,8 @@ Optional environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `ISS_NATIVE_LIBRARY` | Override the native `.so` path. |
+| `ISS_BACKGROUND_FPS=5` | Background presentation/output-sync limit, 1–60. Foreground resumes immediately without an added pacer. |
+| `ISS_ADAPTIVE_FPS=0` | Disable the default Rust activity budget for comparison. |
 | `ISS_VAAPI_DEVICE` | Render node; default `/dev/dri/renderD128`. |
 | `ISS_TILES_PER_FRAME=4` | Compare Apple's tiled stream; experimental reference/recovery behavior. |
 | `ISS_LOG_LIBAV=1` | Verbose libav diagnostics; can produce substantial output during corruption. |
@@ -134,6 +136,29 @@ Optional environment variables:
 `SIGUSR1` dumps Python thread stacks for a stalled native viewer. The GUI logs
 the child's exit status or signal. Remote desktop pixels, packet captures,
 credentials, logs and build products must not be committed.
+
+Adaptive mode keeps the transport connected and decodes all compressed reference
+pictures. It samples background presentation/output synchronization at 5 Hz;
+minimizing stops drawing, releases compositor surfaces and samples outputs at
+1 Hz for progress. Foreground rendering retains the unpaced path. Main-thread
+event waits are interruptible by input/focus events, with 200 ms idle/background
+timeouts and 500 ms minimized timeouts. A static startup picture no longer
+causes recovery-request storms when the Mac sends no subsequent video.
+
+This is client-side resource control, not a 5 fps host encoder setting. Network
+traffic and reference decoding can remain at the source rate while remote
+content moves. Activity snapshots explicitly report `host_fps_controlled=false`.
+Tests cover 600 simulated incoming frames selecting 50 background outputs,
+immediate focus restoration, decoder-reference continuity and idle recovery
+suppression. A live quiet-desktop check is separate from sustained motion/FPS
+validation. Unused Wayland frame-pacing callbacks are no longer requested when
+experimental pacing is off, preventing their accumulation behind occluded windows.
+
+An unattended M1 3840×2160 trial measured 4.5 background render submissions/s
+while decoding 52.8 frames/s, with an empty decode queue and no dropped feedback
+registrations. The window was occluded, so displayed FPS was zero; this measures
+the client work cap, not physical presentation. Startup HEVC reference errors
+still occurred and remain a separate recovery/stability issue.
 
 ## Build on an Apple silicon Mac for an x86 Linux viewer
 

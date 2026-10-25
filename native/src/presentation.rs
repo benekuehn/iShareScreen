@@ -33,12 +33,18 @@ unsafe extern "C" {
     fn bridge_presentation_clock(ptr: *mut c_void) -> c_int;
     fn bridge_presentation_dropped(ptr: *mut c_void) -> u64;
     fn bridge_presentation_frame_pending(ptr: *mut c_void) -> usize;
+    fn bridge_presentation_set_pacing(ptr: *mut c_void, enabled: c_int);
 }
 struct Presentation(*mut c_void);
 impl Drop for Presentation {
     fn drop(&mut self) {
         unsafe { bridge_presentation_free(self.0) };
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iss_presentation_set_pacing(ptr: *mut c_void, enabled: c_int) {
+    unsafe { bridge_presentation_set_pacing(inner(ptr), enabled); }
 }
 unsafe fn inner(ptr: *mut c_void) -> *mut c_void {
     if ptr.is_null() {

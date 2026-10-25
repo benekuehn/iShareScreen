@@ -1,5 +1,6 @@
 //! Portable native protocol core, independent of Python, FFmpeg and a window.
 //! Apple-specific framing is checked against generated reference fixtures.
+pub mod activity;
 pub mod auth;
 pub mod control;
 mod ffi;

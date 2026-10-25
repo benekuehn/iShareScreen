@@ -14,10 +14,11 @@ as a behavioral reference and fixture generator during migration.
 - [x] Verify reference-client adapters on a live Mac session.
 - [x] Native RSA1/SRP authentication and server-proof verification.
 - [x] Standalone CLI authentication with saved endpoint/keyring lookup.
+- [x] Standalone RFB/display/media offer negotiation with a live 3840×2160 answer.
+- [x] Shared Rust activity policy with background presentation and immediate focus restore.
 - [ ] Move UDP reception, AU ordering, bounded NACK/reorder recovery and RTCP
       receiver statistics together into the Rust session worker.
-- [ ] Port RFB negotiation, media offers/answers,
-      display configuration and stream-generation adoption into Rust.
+- [ ] Port mid-session display changes and stream-generation adoption into Rust.
 - [ ] Extend the standalone CLI from authentication to the complete streaming session.
 - [ ] Bind existing GPU decoder/compositor into the standalone process with
       separate network, decode, render and window-event ownership.
@@ -38,6 +39,19 @@ the reference native viewer also calls this Rust implementation through the
 C ABI; packet-recording mode retains the reference handshake for its recorder.
 Native authentication respects the selected mode and fails closed rather than
 automatically falling back after a server-proof failure.
+
+`./launch-native.sh --negotiate-check` additionally performs ClientInit,
+ViewerInfo/encoding setup, encrypted control setup, virtual-display configuration
+and HEVC offer/answer negotiation before disconnecting. A live M1 trial returned
+a 3840×2160 canvas. It still opens no viewer and does not implement the media
+receive loop. Synthetic wire fixtures compare the serialized messages with the
+reference implementation byte for byte.
+
+The Rust activity budget is already used by the reference native viewer. It
+limits background output synchronization and presentation to 5 Hz, keeps
+reference decoding intact, releases minimized composition resources, and restores
+the foreground path without an added frame pacer. This does not lower the
+host's capture rate; source-rate negotiation remains unimplemented.
 
 ## Verification
 

@@ -68,6 +68,8 @@ class Presentation:
         self._last_refresh_ns = None
         self._last_request_at = 0
         self._pacing = os.environ.get("ISS_NATIVE_PRESENT_PACING", "0") == "1"
+        if self._pacing:
+            lib.iss_presentation_set_pacing(handle, 1)
         log.info(
             "Wayland presentation feedback active (clock_id=%d, pacing=%s)",
             self.clock_id,

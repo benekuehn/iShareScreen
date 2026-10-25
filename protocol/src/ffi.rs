@@ -88,7 +88,7 @@ unsafe fn input<'a>(data: *const u8, len: usize, limit: usize) -> Option<&'a [u8
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn iss_protocol_abi_version() -> u32 {
-    1
+    2
 }
 
 /// kind: 0 SRTP receive, 1 SRTP send, 2 SRTCP, 3 enc1103 control.

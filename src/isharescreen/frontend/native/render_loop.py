@@ -23,23 +23,31 @@ def percentile(values, p=0.95):
 
 
 class RenderLoop:
-    def __init__(self, window, session, renderer_factory, presentation=None):
+    def __init__(self, window, session, renderer_factory, presentation=None, activity=None):
         self.window = window
         self.session = session
         self.renderer_factory = renderer_factory
         self.presentation = presentation
+        self.activity = activity
+        self.state_wakeup = threading.Event()
         self.stop_event = threading.Event()
-        self.viewport = (*glfw.get_framebuffer_size(window), True, 0)
+        self.viewport = (*glfw.get_framebuffer_size(window), True, 0, True)
         self.error = None
         self.heartbeat = time.monotonic()
         self.thread = threading.Thread(
             target=self._run, name="native-render", daemon=True
         )
 
-    def update_view(self, width, height, visible=True, *, redraw=False):
+    def update_view(self, width, height, visible=True, *, redraw=False, focused=None):
         old = self.viewport
-        changed = (width, height, visible) != old[:3]
-        self.viewport = (width, height, visible, old[3] + int(redraw or changed))
+        focused = old[4] if focused is None else focused
+        changed = (width, height, visible, focused) != (*old[:3], old[4])
+        if not changed and not redraw:
+            return
+        self.viewport = (width, height, visible, old[3] + int(redraw or changed), focused)
+        if self.activity:
+            self.activity.window(focused, visible)
+        self.state_wakeup.set()
 
     def start(self):
         glfw.make_context_current(None)
@@ -47,6 +55,7 @@ class RenderLoop:
 
     def stop(self):
         self.stop_event.set()
+        self.state_wakeup.set()
         self.thread.join(timeout=3)
         return not self.thread.is_alive()
 
@@ -71,9 +80,23 @@ class RenderLoop:
             while not self.stop_event.is_set() and self.session.is_connected:
                 now = time.monotonic()
                 self.heartbeat = now
-                width, height, visible, revision = self.viewport
+                width, height, visible, revision, focused = self.viewport
                 if not visible or not width or not height:
-                    self.stop_event.wait(0.02)
+                    if renderer:
+                        renderer.close()
+                        renderer = None
+                        canvas = (0, 0)
+                        slot_height = 0
+                        pending.clear()
+                    self.state_wakeup.wait(0.5)
+                    self.state_wakeup.clear()
+                    continue
+                delay = self.activity.render_delay() if self.activity else 0
+                if delay > 0:
+                    # New decoded frames must not wake this background budget
+                    # at 60 Hz. Focus/resize/expose and stop wake it immediately.
+                    self.state_wakeup.wait(min(0.5, delay))
+                    self.state_wakeup.clear()
                     continue
                 dimensions = self.session.canvas_dims
                 if dimensions != canvas:
@@ -128,13 +151,20 @@ class RenderLoop:
                         self.presentation.request(presentation_seq, present_frame)
                     started = time.monotonic()
                     glfw.swap_buffers(self.window)
+                    if self.activity:
+                        self.activity.submitted()
                     swap_times.append((time.monotonic() - started) * 1000)
                     presents += 1
                     last_redraw = revision
                 else:
-                    self.session.wait_for_fresh_tile(0.004 if can_render else 0.001)
+                    self.session.wait_for_fresh_tile(
+                        (0.2 if self.activity else 0.004) if can_render else 0.001
+                    )
                 elapsed = time.monotonic() - profile_started
                 if elapsed >= 5:
+                    if self.activity:
+                        self.session.activity_stats = self.activity.snapshot()
+                        log.info("native activity: %s", json.dumps(self.session.activity_stats))
                     if self.presentation:
                         stats = self.presentation.profile(elapsed)
                         self.session.presentation_stats = stats

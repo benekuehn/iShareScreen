@@ -57,6 +57,18 @@ def test_browser_healthy_allows_first_recovery_fir_only() -> None:
     assert session._decoder.consume_calls == 1
 
 
+def test_static_startup_suppresses_pending_fir_without_forgetting_recovery():
+    session = _make_session()
+    session._last_video_pkt_t = 0.0
+    session._last_publish_t = time.monotonic() - 10.0
+    session._drain_pending_fir()
+    assert session.sent_tiles == []
+    assert session._decoder.consume_calls == 0
+    session._last_video_pkt_t = time.monotonic()
+    session._drain_pending_fir()
+    assert session.sent_tiles == [0]
+
+
 def test_browser_healthy_does_not_block_armed_force_all() -> None:
     """A normal-FPS smear can look "ok" but must not block AVC escalation."""
     session = _make_session(attempts=1)

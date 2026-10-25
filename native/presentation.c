@@ -43,6 +43,7 @@ struct Presentation {
     struct Feedback *pending;
     struct FrameTick *ticks;
     size_t tick_count;
+    int pacing;
     size_t pending_count, head, count;
     uint64_t dropped;
     int clock_id;
@@ -170,25 +171,27 @@ int bridge_presentation_request(void *ptr, uint64_t id, uint64_t decode_ns, uint
     struct Presentation *p = ptr;
     if (!p) return 0;
     pthread_mutex_lock(&p->mutex);
-    if (p->pending_count >= PENDING_CAP || p->tick_count >= PENDING_CAP) {
+    if (p->pending_count >= PENDING_CAP || (p->pacing && p->tick_count >= PENDING_CAP)) {
         p->dropped++; pthread_mutex_unlock(&p->mutex); return 0;
     }
     struct Feedback *f = calloc(1, sizeof(*f));
-    struct FrameTick *tick = calloc(1, sizeof(*tick));
-    if (!f || !tick) { free(f); free(tick); p->dropped++; pthread_mutex_unlock(&p->mutex); return 0; }
+    struct FrameTick *tick = p->pacing ? calloc(1, sizeof(*tick)) : NULL;
+    if (!f || (p->pacing && !tick)) { free(f); free(tick); p->dropped++; pthread_mutex_unlock(&p->mutex); return 0; }
     f->owner=p;
     f->event=(struct PresentationEvent){.frame_id=id, .submit_ns=monotonic_ns(),
         .decode_submit_ns=decode_ns, .gpu_ready_ns=ready_ns};
     f->proxy=wp_presentation_feedback(p->proxy, p->surface);
     if (!f->proxy) { free(f); free(tick); p->dropped++; pthread_mutex_unlock(&p->mutex); return 0; }
-    tick->owner=p;
-    tick->proxy=wl_surface_frame(p->surface_wrapper);
-    if (!tick->proxy) {
-        wp_presentation_feedback_destroy(f->proxy); free(f); free(tick);
-        p->dropped++; pthread_mutex_unlock(&p->mutex); return 0;
+    if (tick) {
+        tick->owner=p;
+        tick->proxy=wl_surface_frame(p->surface_wrapper);
+        if (!tick->proxy) {
+            wp_presentation_feedback_destroy(f->proxy); free(f); free(tick);
+            p->dropped++; pthread_mutex_unlock(&p->mutex); return 0;
+        }
+        wl_callback_add_listener(tick->proxy, &frame_listener, tick);
+        tick->next=p->ticks; p->ticks=tick; p->tick_count++;
     }
-    wl_callback_add_listener(tick->proxy, &frame_listener, tick);
-    tick->next=p->ticks; p->ticks=tick; p->tick_count++;
     wp_presentation_feedback_add_listener(f->proxy, &feedback_listener, f);
     f->next=p->pending; p->pending=f; p->pending_count++;
     pthread_mutex_unlock(&p->mutex);
@@ -230,4 +233,11 @@ size_t bridge_presentation_frame_pending(void *ptr) {
     size_t value=p->tick_count;
     pthread_mutex_unlock(&p->mutex);
     return value;
+}
+void bridge_presentation_set_pacing(void *ptr, int enabled) {
+    if (!ptr) return;
+    struct Presentation *p=ptr;
+    pthread_mutex_lock(&p->mutex);
+    p->pacing=enabled != 0;
+    pthread_mutex_unlock(&p->mutex);
 }
