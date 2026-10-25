@@ -51,11 +51,15 @@ def aggregation_has_donl(payload: bytes) -> Optional[bool]:
     return None
 
 
-def reassemble_group(payloads: Iterable[bytes], *, has_donl: bool = True) -> list[bytes]:
+def reassemble_group(payloads: Iterable[bytes], *, has_donl: bool = True, partial_params: bool = False) -> list[bytes]:
     """Turn the RTP payloads belonging to one timestamp group into clean
     NALUs. Handles AP, FU, and single-NAL packets with Apple's DONL
     conventions. Drops malformed entries silently — UDP loss makes that
     routine, and the decoder gets to error on what survives."""
+    import os
+    if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+        from ..protocol.rust_core import reassemble
+        return reassemble(payloads, has_donl=has_donl, partial_params=partial_params)
     out: list[bytes] = []
     fu_buf = bytearray()
     fu_active = False

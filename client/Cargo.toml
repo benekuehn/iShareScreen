@@ -1,0 +1,19 @@
+[package]
+name = "isharescreen-client"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Standalone native Apple Screen Sharing client (under migration)"
+
+[[bin]]
+name = "iss-native"
+path = "src/main.rs"
+
+[dependencies]
+isharescreen-protocol = { path = "../protocol" }
+serde_json = "1"
+zeroize = "1.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

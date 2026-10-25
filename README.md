@@ -8,6 +8,9 @@ available.
 This fork includes an experimental Linux GPU decode/composition path. See
 [native/README.md](native/README.md) for build instructions, validation and
 current limitations. Run `--frontend native` to try it.
+The standalone Rust migration is tracked in [NATIVE_PORT.md](NATIVE_PORT.md).
+Its current `iss-native --auth-check` executable authenticates without Python;
+the standalone streaming viewer is still under construction.
 
 ## Setup
 

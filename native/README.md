@@ -12,8 +12,11 @@ Native AVC decoding also runs on a separate bounded worker, so waiting for
 GPU completion cannot stop RTP decryption/assembly. Configuration epochs discard
 queued work from before a resize/restart; codec shutdown waits for that worker.
 
-The existing Python session still handles authentication, transport decryption,
-loss recovery, input, audio and clipboard. This is not a complete Rust client.
+The Rust protocol core now handles RSA1/SRP authentication, SRTP/SRTCP,
+enc1103 control cryptography and HEVC depacketization for the native frontend.
+The existing Python session still orchestrates negotiation, access-unit order,
+loss recovery, input, audio and clipboard. This is not a complete Rust client;
+see [NATIVE_PORT.md](../NATIVE_PORT.md) for the standalone migration gates.
 
 Status: experimental. A completion-wait trial brought 4K submission throughput
 close to decoder output (about 56–58 fps in short motion intervals), eliminating
@@ -70,11 +73,11 @@ completeness and decoder error signals remain active.
 
 Requirements: Rust/Cargo supporting edition 2024, a C compiler, pkg-config,
 FFmpeg development libraries, libva, EGL, GLES3, Wayland client libraries,
-`wayland-scanner` and the `wayland-protocols` XML files. The runtime also requires
+OpenSSL development libraries, `wayland-scanner` and the `wayland-protocols` XML files. The runtime also requires
 a VAAPI driver supporting the selected codec, a usable render device and
 `EGL_EXT_image_dma_buf_import` / `GL_OES_EGL_image_external_essl3`.
 
-On Arch, the build packages are `rust base-devel pkgconf ffmpeg libva libglvnd wayland wayland-protocols`.
+On Arch, the build packages are `rust base-devel pkgconf ffmpeg libva libglvnd wayland wayland-protocols openssl`.
 Install the appropriate GPU driver separately; Intel GPUs commonly use
 `intel-media-driver`. GPU support must be confirmed by a real decode, not just
 an advertised profile.
@@ -84,6 +87,9 @@ cd native
 cargo test --locked
 cargo build --release --locked
 cd ..
+cargo test --locked --manifest-path protocol/Cargo.toml
+cargo build --release --locked --manifest-path protocol/Cargo.toml
+cargo build --release --locked --manifest-path client/Cargo.toml
 python -m venv .venv
 .venv/bin/pip install -e '.[test]'
 ./launch-performance.sh
@@ -122,6 +128,8 @@ Optional environment variables:
 | `ISS_NATIVE_SYNC_DECODE=0` | Compare asynchronous GPU output; the current trial waits for completion on the decoder worker before publishing. |
 | `ISS_VIDEO_RTCP_MUX=0` | Compare legacy video feedback on port 5900; native sends video RTCP on video port 5901. |
 | `ISS_NATIVE_PRESENT_PACING=1` | Opt into experimental frame-callback pacing. Default off after a user-reported responsiveness regression. |
+| `ISS_NATIVE_PROTOCOL=0` | Compare the Python reference authentication/transport; the native viewer defaults to Rust. |
+| `ISS_PROTOCOL_VERIFY=1` | Compare live Rust SRTP results against the Python reference. Extra development overhead; never logs payloads/keys. |
 
 `SIGUSR1` dumps Python thread stacks for a stalled native viewer. The GUI logs
 the child's exit status or signal. Remote desktop pixels, packet captures,

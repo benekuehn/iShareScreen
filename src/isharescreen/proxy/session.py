@@ -2661,7 +2661,7 @@ class Session:
         _reassemble = reassemble_h264 if self._video_codec == "avc" else reassemble_group
         au_cb = self._video_au_callback if self._video_codec == "avc" else None
 
-        nalus = list(_reassemble(ordered)) if self._video_codec == "avc" else reassemble_group(ordered,has_donl=has_donl)
+        nalus = list(_reassemble(ordered)) if self._video_codec == "avc" else reassemble_group(ordered,has_donl=has_donl,partial_params=incomplete)
 
         # If a dynamic resolution change is in progress, harvest fresh
         # VPS/SPS/PPS from the new encoder's burst so the restarted

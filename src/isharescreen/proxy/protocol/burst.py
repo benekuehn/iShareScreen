@@ -167,7 +167,7 @@ def gather_initial_burst(
                                 nonlocal_state["sps"] = config[0]
                                 all_pps[0] = config[1]
                 else:
-                    for nalu in reassemble_group((p for _, _, p in packets), has_donl=nonlocal_state.get("has_donl",True)):
+                    for nalu in reassemble_group((p for _, _, p in packets), has_donl=nonlocal_state.get("has_donl",True), partial_params=True):
                         if len(nalu) < 2:
                             continue
                         nt = (nalu[0] >> 1) & 0x3F

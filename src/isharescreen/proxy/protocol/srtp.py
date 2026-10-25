@@ -92,6 +92,10 @@ class SRTPDecryptor:
     @classmethod
     def from_blob(cls, blob: bytes) -> "SRTPDecryptor":
         """Construct from a 46-byte AVCMediaStreamNegotiator key blob."""
+        import os
+        if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+            from .rust_core import Receiver
+            return Receiver(blob)
         key, salt = _split_blob(blob)
         return cls(key, salt)
 
@@ -243,6 +247,10 @@ class SRTPEncryptor:
     @classmethod
     def from_blob(cls, blob: bytes, ssrc: int) -> "SRTPEncryptor":
         """Construct from a 46-byte AVCMediaStreamNegotiator key blob."""
+        import os
+        if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+            from .rust_core import Sender
+            return Sender(blob, ssrc)
         key, salt = _split_blob(blob)
         return cls(key, salt, ssrc)
 
@@ -282,6 +290,10 @@ class SRTCPDecryptor:
 
     @classmethod
     def from_blob(cls, blob: bytes) -> "SRTCPDecryptor":
+        import os
+        if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+            from .rust_core import Control
+            return Control(blob)
         key, salt = _split_blob(blob)
         return cls(key, salt)
 
@@ -335,6 +347,10 @@ class SRTCPEncryptor:
 
     @classmethod
     def from_blob(cls, blob: bytes) -> "SRTCPEncryptor":
+        import os
+        if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+            from .rust_core import Control
+            return Control(blob)
         key, salt = _split_blob(blob)
         return cls(key, salt)
 

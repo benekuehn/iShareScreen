@@ -544,6 +544,10 @@ def _run_frontend(config: SessionConfig, args: argparse.Namespace) -> int:
     if args.frontend == "native":
         sys.setswitchinterval(0.001)
         os.environ["ISS_NATIVE_GPU"] = "1"
+        os.environ.setdefault("ISS_NATIVE_PROTOCOL", "1")
+        if os.environ["ISS_NATIVE_PROTOCOL"] == "1":
+            from .proxy.protocol.rust_core import library as protocol_library
+            protocol_library()  # Fail clearly before connecting if the core is missing.
         os.environ.setdefault("ISS_LOG_LIBAV", "0")
         # A single HEVC picture avoids Apple's cross-tile reference chain.
         # VAAPI still receives the full 4:4:4 picture, with no CPU readback.

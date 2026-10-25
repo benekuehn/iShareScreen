@@ -246,6 +246,9 @@ def _phase_auth(
 ) -> tuple[socket.socket, bytes]:
     """Open TCP, run auth (with fallback on AuthError), return live socket
     and the 16-byte enc1103 master key."""
+    if os.environ.get("ISS_NATIVE_PROTOCOL") == "1" and recorder is None:
+        from .rust_core import connect_authenticated
+        return connect_authenticated(host, port, username, password, mode)
     primary, fallback = (
         (do_srp_auth, do_nonsrp_auth) if mode == "srp"
         else (do_nonsrp_auth, do_srp_auth)
@@ -864,7 +867,10 @@ def _read_until_enc1103(
                 enc = struct.unpack(">i", init[p + 8:p + 12])[0]
                 p += 12
                 if enc == 1103 and p + 36 <= len(init):
-                    cipher = StreamCipher(bytes(init[p:p + 36]), ecb_key=ecb_key)
+                    cipher_class = StreamCipher
+                    if os.environ.get("ISS_NATIVE_PROTOCOL") == "1":
+                        from .rust_core import StreamCipher as cipher_class
+                    cipher = cipher_class(bytes(init[p:p + 36]), ecb_key=ecb_key)
                     p += 36
                 elif enc in (1010, 1011) and p + 2 <= len(init):
                     sz = struct.unpack(">H", init[p:p + 2])[0]

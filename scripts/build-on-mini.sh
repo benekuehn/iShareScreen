@@ -15,6 +15,14 @@ rsync -az --exclude=.git --exclude='.venv*' --exclude=target \
   --exclude=local-state --exclude=__pycache__ --exclude='*.log' \
   "$app_dir/" "$build_host:$build_dir/"
 ssh "$build_host" 'export PATH=/opt/homebrew/bin:$PATH; container exec -w /work/native isharescreen-build cargo test --locked && container exec -w /work/native isharescreen-build cargo build --release --locked'
+ssh "$build_host" 'export PATH=/opt/homebrew/bin:$PATH; container exec -e CARGO_TARGET_DIR=/work/protocol/target/linux -w /work/protocol isharescreen-build cargo test --locked && container exec -e CARGO_TARGET_DIR=/work/protocol/target/linux -w /work/protocol isharescreen-build cargo build --release --locked'
+ssh "$build_host" 'export PATH=/opt/homebrew/bin:$PATH; container exec -e CARGO_TARGET_DIR=/work/client/target/linux -w /work/client isharescreen-build cargo test --locked && container exec -e CARGO_TARGET_DIR=/work/client/target/linux -w /work/client isharescreen-build cargo build --release --locked'
 mkdir -p "$app_dir/native/target/release"
 rsync -az "$build_host:$build_dir/native/target/release/libisharescreen_native.so" \
   "$app_dir/native/target/release/"
+mkdir -p "$app_dir/protocol/target/release"
+rsync -az "$build_host:$build_dir/protocol/target/linux/release/libisharescreen_protocol.so" \
+  "$app_dir/protocol/target/release/"
+mkdir -p "$app_dir/client/target/release"
+rsync -az "$build_host:$build_dir/client/target/linux/release/iss-native" \
+  "$app_dir/client/target/release/"
