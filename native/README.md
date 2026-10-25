@@ -48,7 +48,16 @@ and carries it into fragment/single-NAL parsing. LTR acknowledgment is disabled
 when there is no DONL to echo. A short, bounded NACK/reorder window applies to
 this stream as well as AVC. Unchanged desktops naturally produce fewer updates.
 NACK requests cover up to 1,024 recent missing packets (large intra pictures
-can span hundreds). Receiver reports carry measured interval/cumulative loss
+can span hundreds). Missing packets remain tracked for at most 75 ms, with
+up to three NACK attempts separated by 20 ms; received packets cancel retries.
+Tracking is bounded to 1,024 packets per source and 32 SSRC generations, and
+shared receive/transmit state is protected by a lock. Retry wakeups do not
+accelerate heartbeat, receiver-report, cursor-poll or profile cadence.
+The control snapshot's `rtp_repair` counters distinguish observed gaps, packets
+that returned within the window, expiry, eviction and NACK attempts/errors.
+`returned_after_nack` alone cannot distinguish retransmission from reordering.
+Healthy access units still flush immediately; retries do not extend the repair
+window or delay clean frames. Receiver reports carry measured interval/cumulative loss
 and RTP-clock jitter, including late/duplicate reception, rather than zero
 placeholders. Jitter includes client packet-processing scheduling delay.
 The offer keeps RTCP feedback enabled independently of LTR acknowledgments;

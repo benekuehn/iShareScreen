@@ -1,10 +1,11 @@
-from collections import defaultdict
 from types import SimpleNamespace as S
+import time
 
 import pytest
 
 from isharescreen.proxy.session import Session
 from isharescreen.proxy.protocol.rtp_stats import ReceptionStats
+from isharescreen.proxy.protocol.rtp_repair import PacketRepair
 import struct
 
 
@@ -29,7 +30,8 @@ def test_video_feedback_uses_video_port_for_nack_rr_and_fir(monkeypatch):
     session._our_video_ssrc = 3
     session._srtcp_enc = S(protect=lambda data: data)
     session._ssrc_to_tile = {7: 0}
-    session._nack_pending = defaultdict(set, {7: {10, 11}})
+    session._rtp_repair = PacketRepair()
+    session._rtp_repair.missing(7, [10, 11], time.monotonic())
     session._max_seq = {7: 12}
     session._roc = {7: 0}
     session._server_sr = {}

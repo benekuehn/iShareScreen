@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import threading
-from collections import defaultdict
 import time
 import types
 import pytest
 
 from isharescreen.proxy.media.quality_gate import FrameQualityGate
 from isharescreen.proxy.session import Session
+from isharescreen.proxy.protocol.rtp_repair import PacketRepair
 
 
 @pytest.mark.parametrize("start", [100, 65500])
@@ -21,15 +21,17 @@ def test_nack_covers_a_4k_picture_gap_larger_than_31_packets(start):
     session._received_pkts = session._lost_pkts = 0
     session._ssrc_to_tile = {source: 0}
     session._lost_pkts_per_tile = [0]
-    session._nack_pending = defaultdict(set)
+    session._rtp_repair = PacketRepair()
     session._track_seq(source, (start + 200) & 0xFFFF)
-    assert session._nack_pending[source] == {
+    assert set(session._rtp_repair.due(time.monotonic())[0][1]) == {
         (start + offset) & 0xFFFF for offset in range(1, 200)
     }
     session._track_seq(source, (start + 50) & 0xFFFF)
-    assert (start + 50) & 0xFFFF not in session._nack_pending[source]
+    assert (start + 50) & 0xFFFF not in set(
+        session._rtp_repair.due(time.monotonic() + 0.021)[0][1]
+    )
     session._track_seq(source, (start + 5000) & 0xFFFF)
-    assert len(session._nack_pending[source]) <= 1024
+    assert session._rtp_repair.snapshot()["pending"] <= 1024
 
 
 def _group_session() -> Session:
@@ -202,7 +204,7 @@ def test_sequence_gap_wakes_nack_without_immediate_decoder_failure():
     session._ssrc_to_tile = {0x1000: 0}
     session._max_seq = {0x1000: 10}
     session._roc = {0x1000: 0}
-    session._nack_pending = __import__("collections").defaultdict(set)
+    session._rtp_repair = PacketRepair()
     session._received_pkts = 0
     session._lost_pkts = 0
     session._lost_pkts_per_tile = [0]
@@ -211,6 +213,6 @@ def test_sequence_gap_wakes_nack_without_immediate_decoder_failure():
 
     session._track_seq(0x1000, 12)
 
-    assert session._nack_pending[0x1000] == {11}
+    assert session._rtp_repair.due(time.monotonic()) == [(0x1000, [11])]
     assert gate._keyframe_required == set()
     assert session._tx_wakeup.is_set()

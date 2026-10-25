@@ -76,6 +76,7 @@ from .protocol.srtp import (
     SRTPEncryptor,
 )
 from .protocol.rtp_stats import ReceptionStats
+from .protocol.rtp_repair import PacketRepair
 
 
 log = logging.getLogger(__name__)
@@ -167,7 +168,7 @@ _SSRC_ADOPT_STALL_S = 2.0
 # pending-groups dict growing unbounded on lossy links.
 _PENDING_GROUP_TTL_S = 0.2
 
-# AVC only: once a later packet exposes an RTP sequence gap, retain that access
+# Once a later packet exposes an RTP sequence gap, retain that access
 # unit (and later units behind it) briefly while an immediate NACK asks Apple
 # for the missing packet. LAN retransmits normally arrive within a few
 # milliseconds; 75 ms gives generous headroom without adding latency to
@@ -479,7 +480,7 @@ class Session:
         self.video_access_units = 0
         self.presentation_stats = None
         self._roc: dict[int, int] = {}
-        self._nack_pending: dict[int, set[int]] = defaultdict(set)
+        self._rtp_repair = PacketRepair(window=_AVC_RTP_REPAIR_WAIT_S)
         # Cumulative packet-loss tracking. Lets consumers report a
         # real loss rate instead of guessing concealment is loss-driven.
         self._received_pkts: int = 0
@@ -1698,7 +1699,7 @@ class Session:
         self.video_access_units = 0
         self.presentation_stats = None
         self._roc = {}
-        self._nack_pending = defaultdict(set)
+        self._rtp_repair = PacketRepair(window=_AVC_RTP_REPAIR_WAIT_S)
         self._server_sr = {}
         self._runtime_canvas_w = 0
         self._runtime_canvas_h = 0
@@ -2894,6 +2895,8 @@ class Session:
     # ── sequence tracking + dynamic SSRC adoption ────────────────────
 
     def _track_seq(self, ssrc: int, seq: int) -> None:
+        now = time.monotonic()
+        self._rtp_repair.received(ssrc, seq, now)
         prev = self._max_seq.get(ssrc)
         # Packet-loss accounting (cumulative since session start).
         # `_received_pkts` is incremented unconditionally; `_lost_pkts`
@@ -2912,7 +2915,6 @@ class Session:
             # Late/reordered retransmit. If its NACK has not been drained yet,
             # cancel that request; the group repair path will decide whether
             # the access unit is now complete.
-            self._nack_pending[ssrc].discard(seq)
             return
         # Forward jump → record any skipped seqs as NACK candidates.
         # Do not mark the decoder broken yet: this may be ordinary UDP reorder,
@@ -2920,19 +2922,16 @@ class Session:
         # Only `_drop_incomplete_group` escalates after that window expires.
         tile_idx = self._ssrc_to_tile.get(ssrc)
         had_loss = False
+        missing = []
         for missed in range(max(1, diff - _NACK_PACKET_WINDOW), diff):
             lost = (prev + missed) & 0xFFFF
-            self._nack_pending[ssrc].add(lost)
+            missing.append(lost)
             self._lost_pkts += 1
             had_loss = True
             if tile_idx is not None and tile_idx < len(self._lost_pkts_per_tile):
                 self._lost_pkts_per_tile[tile_idx] += 1
-        if len(self._nack_pending[ssrc]) > _NACK_PACKET_WINDOW:
-            self._nack_pending[ssrc] = {
-                value for value in self._nack_pending[ssrc]
-                if 0 < ((seq - value) & 0xffff) <= _NACK_PACKET_WINDOW
-            }
         if had_loss:
+            self._rtp_repair.missing(ssrc, missing, now)
             wake = getattr(self, "_tx_wakeup", None)
             if wake is not None:
                 wake.set()
@@ -3790,15 +3789,21 @@ class Session:
             pass
 
     def _tx_loop(self) -> None:
+        next_periodic = 0.0
         while not self._stop_evt.is_set():
             # Clear before processing so a wake raised during this tick remains
             # set for the wait below; clearing after wait can lose that race
             # and postpone a NACK by another 500 ms.
             self._tx_wakeup.clear()
-            self._tx_tick += 1
+            now = time.monotonic()
+            periodic = now >= next_periodic
+            if periodic:
+                next_periodic = now + _TX_INTERVAL_S
+                self._tx_tick += 1
             try:
-                self._send_heartbeat()
-                self._send_rr_and_maybe_sr()
+                if periodic:
+                    self._send_heartbeat()
+                    self._send_rr_and_maybe_sr()
                 if self._needs_post_layout_fir:
                     self._needs_post_layout_fir = False
                     self.request_fir()
@@ -3806,14 +3811,18 @@ class Session:
                 # recovery path entirely.
                 self._drain_pending_nack()
                 self._drain_pending_fir()
-                self._maybe_reanchor_d3d11va_avc()
-                self._check_stall()
-                self._maybe_poll_cursor()
-                if self._tx_tick % _TX_PROFILE_EVERY_N_TICKS == 0:
-                    self._log_profile_snapshot()
+                if periodic:
+                    self._maybe_reanchor_d3d11va_avc()
+                    self._check_stall()
+                    self._maybe_poll_cursor()
+                    if self._tx_tick % _TX_PROFILE_EVERY_N_TICKS == 0:
+                        self._log_profile_snapshot()
             except Exception as e:
                 log.debug("tx loop tick error: %s", e)
-            self._tx_wakeup.wait(_TX_INTERVAL_S)
+            now = time.monotonic()
+            self._tx_wakeup.wait(self._rtp_repair.next_delay(
+                now, max(0, next_periodic - now),
+            ))
 
     def _audio_rtcp_rates(self, elapsed: float) -> dict:
         """Split the rtcp-muxed 'ctrl' socket into its real components: the
@@ -4059,6 +4068,7 @@ class Session:
                 ],
                 "loss_total": loss_total,
                 "rtcp_receiver": self._last_receiver_reports,
+                "rtp_repair": self._rtp_repair.snapshot(),
                 "presentation": getattr(self, "presentation_stats", None),
                 "loss_unmapped": loss_unmapped,
                 "ssrc_groups": ssrc_groups,
@@ -4295,10 +4305,7 @@ class Session:
         sender = self._our_video_ssrc
         if sock is None or enc is None or sender is None:
             return
-        for ssrc in list(self._nack_pending.keys()):
-            seqs = self._nack_pending.pop(ssrc, set())
-            if not seqs:
-                continue
+        for ssrc, seqs in self._rtp_repair.due(time.monotonic()):
             nack = build_nack(sender, ssrc, seqs)
             if not nack:
                 continue
@@ -4306,6 +4313,7 @@ class Session:
             try:
                 sock.sendto(enc.protect(compound), (self._dest_host, port))
             except OSError as e:
+                self._rtp_repair.send_failed()
                 log.debug("NACK send failed: %s", e)
 
     def _maybe_reanchor_d3d11va_avc(self) -> None:
