@@ -1,6 +1,15 @@
-//! Native executable migration checkpoint. Auth-check opens no viewer and
-//! performs no Python subprocess calls. Streaming/session UI follows next.
+//! Standalone native client. Runtime session code has no Python dependency.
 use isharescreen_protocol::auth;
+#[cfg(target_os = "linux")]
+mod audio;
+#[cfg(target_os = "linux")]
+mod extensions;
+#[cfg(target_os = "linux")]
+mod gpu;
+#[cfg(target_os = "linux")]
+mod transport;
+#[cfg(target_os = "linux")]
+mod viewer;
 mod wire;
 use serde_json::Value;
 use std::io::{self, IsTerminal, Read};
@@ -65,7 +74,7 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "iss-native (--auth-check | --negotiate-check) --last [--host HOST] [--user USER] [--port PORT] [--auth srp|nonsrp] [--password-stdin]\n\nNative migration checkpoints: authenticate or negotiate the media session\nwithout Python, then disconnect. The standalone viewer is still being ported."
+            "iss-native --last [--host HOST] [--user USER] [--port PORT] [--auth srp|nonsrp] [--password-stdin] [--background-fps 5] [--no-audio] [--reconnect] [--auto-quit-secs N]\n\nStandalone Linux VAAPI/EGL viewer. --auth-check and --negotiate-check\nperform a connection check and exit without opening a window."
         );
         return Ok(());
     }
@@ -73,6 +82,8 @@ fn run() -> Result<()> {
     let mut check = false;
     let mut negotiate = false;
     let mut stdin = false;
+    let mut no_audio = false;
+    let mut reconnect = false;
     let mut overrides = std::collections::HashMap::new();
     let mut index = 0;
     while index < args.len() {
@@ -81,7 +92,9 @@ fn run() -> Result<()> {
             "--auth-check" => check = true,
             "--negotiate-check" => negotiate = true,
             "--password-stdin" => stdin = true,
-            "--host" | "--user" | "--port" | "--auth" => {
+            "--no-audio" => no_audio = true,
+            "--reconnect" => reconnect = true,
+            "--host" | "--user" | "--port" | "--auth" | "--background-fps" | "--auto-quit-secs" => {
                 let key = args[index].trim_start_matches("--").to_owned();
                 index += 1;
                 overrides.insert(key, args.get(index).ok_or("option needs a value")?.clone());
@@ -90,8 +103,8 @@ fn run() -> Result<()> {
         }
         index += 1;
     }
-    if check == negotiate {
-        return Err("choose --auth-check or --negotiate-check; standalone presentation is still being ported".into());
+    if check && negotiate {
+        return Err("choose only one connection check".into());
     }
     let mut settings = if last {
         let base = std::env::var_os("XDG_STATE_HOME")
@@ -136,42 +149,86 @@ fn run() -> Result<()> {
     if password.is_empty() {
         return Err("empty password; authentication was not attempted".into());
     }
-    let warmup = auth::open(host, port)?;
-    drop(warmup);
-    std::thread::sleep(Duration::from_millis(1400));
-    let (stream, key) = auth::connect(host, port, user, &password, mode == "srp")?;
-    if negotiate {
-        let scale = match settings["hidpi"].as_str().unwrap_or("2") {
-            "on" => 2.0,
-            "off" | "auto" => 1.0,
-            value => value.parse::<f64>()?,
-        };
-        let backing = settings["advertise"]
-            .as_str()
-            .filter(|value| *value != "auto")
-            .unwrap_or("3840x2160");
-        let (width, height) = backing
-            .split_once('x')
-            .ok_or("invalid saved display geometry")?;
-        let width = (width.parse::<u32>()? as f64 / scale).round() as u32;
-        let height = (height.parse::<u32>()? as f64 / scale).round() as u32;
-        let result = wire::negotiate(
-            stream,
-            &*key,
-            width,
-            height,
-            scale,
-            settings["curtain"].as_bool().unwrap_or(true),
-            false,
-        )?;
-        println!(
-            "Native negotiation succeeded: {}x{} canvas (no Python process; no viewer opened)",
-            result.width, result.height
-        );
-    } else {
-        println!("Native {mode} authentication succeeded; checkpoint complete (no Python process)");
+    let background: u32 = settings["background-fps"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| std::env::var("ISS_BACKGROUND_FPS").ok())
+        .unwrap_or("5".into())
+        .parse()?;
+    if !(1..=60).contains(&background) {
+        return Err("background FPS must be between 1 and 60".into());
     }
-    Ok(())
+    let auto_quit: f64 = settings["auto-quit-secs"].as_str().unwrap_or("0").parse()?;
+    if !auto_quit.is_finite() || auto_quit < 0.0 {
+        return Err("auto-quit seconds must be finite and nonnegative".into());
+    }
+    let mut retry_delay = 1;
+    loop {
+        let outcome = (|| -> Result<()> {
+            #[cfg(target_os = "linux")]
+            let sockets = if !check && !negotiate {
+                Some(transport::Sockets::open(host, port)?)
+            } else {
+                None
+            };
+            let warmup = auth::open(host, port)?;
+            drop(warmup);
+            std::thread::sleep(Duration::from_millis(1400));
+            let (stream, key) = auth::connect(host, port, user, &password, mode == "srp")?;
+            if !check {
+                let scale = match settings["hidpi"].as_str().unwrap_or("2") {
+                    "on" => 2.0,
+                    "off" | "auto" => 1.0,
+                    value => value.parse::<f64>()?,
+                };
+                let backing = settings["advertise"]
+                    .as_str()
+                    .filter(|value| *value != "auto")
+                    .unwrap_or("3840x2160");
+                let (width, height) = backing
+                    .split_once('x')
+                    .ok_or("invalid saved display geometry")?;
+                let width = (width.parse::<u32>()? as f64 / scale).round() as u32;
+                let height = (height.parse::<u32>()? as f64 / scale).round() as u32;
+                let audio = !no_audio && !negotiate && settings["audio"].as_bool().unwrap_or(true);
+                let result = wire::negotiate(
+                    stream,
+                    &*key,
+                    width,
+                    height,
+                    scale,
+                    settings["curtain"].as_bool().unwrap_or(true),
+                    audio,
+                )?;
+                if negotiate {
+                    println!(
+                        "Native negotiation succeeded: {}x{} canvas (no Python process; no viewer opened)",
+                        result.width, result.height
+                    );
+                } else {
+                    #[cfg(target_os = "linux")]
+                    {
+                        viewer::run(result, sockets.unwrap(), background, auto_quit, audio)?;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    return Err("standalone GPU presentation currently requires Linux/VAAPI".into());
+                }
+            } else {
+                println!(
+                    "Native {mode} authentication succeeded; checkpoint complete (no Python process)"
+                );
+            }
+            Ok(())
+        })();
+        match outcome {
+            Err(error) if reconnect && !check && !negotiate => {
+                eprintln!("Session ended: {error}; reconnecting in {retry_delay}s");
+                std::thread::sleep(Duration::from_secs(retry_delay));
+                retry_delay = (retry_delay * 2).min(8);
+            }
+            result => return result,
+        }
+    }
 }
 fn main() {
     if let Err(error) = run() {

@@ -1,5 +1,9 @@
 # Experimental Linux GPU engine
 
+For the standalone Rust/C application using this engine, run
+`./launch-native.sh`; see [NATIVE_PORT.md](../NATIVE_PORT.md). The reference
+Python frontend remains available for comparison.
+
 This branch adds `--frontend native`: a Rust-owned FFmpeg/VAAPI decoder and
 EGL/GLES compositor. Compressed packets cross the Python ABI; decoded pixels
 remain GPU surfaces through DMA-BUF import, color conversion and composition.

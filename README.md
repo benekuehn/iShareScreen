@@ -96,6 +96,18 @@ UDP 5900–5901 inbound.
 
 ## Usage
 
+This branch also provides a standalone Linux Rust/C client. With this checkout's
+saved endpoint and login-keyring credential, launch it directly:
+
+```sh
+./launch-native.sh --reconnect
+```
+
+It supports VAAPI/EGL 4K decoding, input, cursor, clipboard and audio, with a
+5 fps background rendering cap. Python is not part of its running session.
+See [NATIVE_PORT.md](NATIVE_PORT.md) for builds, dependencies and remaining
+performance/acceptance work. The commands below launch the reference client.
+
 ```sh
 # One-time setup: prompts for the Mac password without echoing it.
 iss connect --host mac.local -u me --preset native-4k --remember-password

@@ -403,7 +403,31 @@ pub struct Link {
     cipher: Cipher,
     buffer: Vec<u8>,
 }
+fn pointer_message(key: &[u8], buttons: u8, x: u16, y: u16) -> Result<Vec<u8>> {
+    let mut plain = [0u8; 16];
+    plain[10] = 255;
+    plain[11] = buttons;
+    plain[12..14].copy_from_slice(&x.to_be_bytes());
+    plain[14..16].copy_from_slice(&y.to_be_bytes());
+    let mut cryptor = openssl::symm::Crypter::new(
+        openssl::symm::Cipher::aes_128_ecb(),
+        openssl::symm::Mode::Encrypt,
+        key,
+        None,
+    )?;
+    cryptor.pad(false);
+    let mut encrypted = [0u8; 32];
+    let size = cryptor.update(&plain, &mut encrypted)?;
+    cryptor.finalize(&mut encrypted[size..])?;
+    let mut message = vec![0x10, 0];
+    message.extend_from_slice(&encrypted[..16]);
+    Ok(message)
+}
 impl Link {
+    pub fn pointer(&mut self, buttons: u8, x: u16, y: u16) -> Result<()> {
+        let message = pointer_message(self.cipher.cbc_key(), buttons, x, y)?;
+        self.send(&message)
+    }
     pub fn send(&mut self, message: &[u8]) -> Result<()> {
         self.socket.write_all(&self.cipher.encrypt(message)?)?;
         Ok(())
@@ -563,8 +587,11 @@ pub fn negotiate(
     let mut retry = Instant::now() + Duration::from_millis(250);
     let mut attempts = 0;
     while Instant::now() < deadline {
-        for message in link.poll()? {
+        let received = link.poll()?;
+        let mut received = received.into_iter();
+        while let Some(message) = received.next() {
             if let Some((width, height, _tiles)) = answer_dims(&message) {
+                pending.extend(received);
                 return Ok(Negotiated {
                     link,
                     keys,
@@ -606,6 +633,10 @@ mod tests {
         assert_eq!(fixture["synthetic_only"], true);
         assert_eq!(viewer_info(), unhex(&fixture["viewer_info"]));
         assert_eq!(encodings(), unhex(&fixture["encodings"]));
+        assert_eq!(
+            pointer_message(&(0u8..16).collect::<Vec<_>>(), 3, 1234, 567).unwrap(),
+            unhex(&fixture["pointer"])
+        );
         assert_eq!(
             virtual_display(1920, 1080, 2.).unwrap(),
             unhex(&fixture["virtual_display"])

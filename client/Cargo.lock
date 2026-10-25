@@ -207,12 +207,23 @@ dependencies = [
 name = "isharescreen-client"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "flate2",
+ "isharescreen-native",
  "isharescreen-protocol",
  "openssl",
+ "pkg-config",
  "plist",
  "serde_json",
  "zeroize",
+]
+
+[[package]]
+name = "isharescreen-native"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

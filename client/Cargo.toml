@@ -3,7 +3,7 @@ name = "isharescreen-client"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-description = "Standalone native Apple Screen Sharing client (under migration)"
+description = "Standalone native GPU Apple Screen Sharing client for Linux"
 
 [[bin]]
 name = "iss-native"
@@ -16,6 +16,13 @@ zeroize = "1.8"
 openssl = "0.10.81"
 plist = "1.10.3"
 flate2 = "1.1.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+isharescreen-native = { path = "../native" }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
 
 [profile.release]
 lto = "thin"

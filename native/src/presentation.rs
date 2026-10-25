@@ -5,15 +5,15 @@ use std::ffi::{c_int, c_void};
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct PresentationEvent {
-    frame_id: u64,
-    submit_ns: u64,
-    decode_submit_ns: u64,
-    gpu_ready_ns: u64,
-    presented_ns: u64,
-    refresh_ns: u64,
-    sequence: u64,
-    flags: u64,
-    discarded: u64,
+    pub frame_id: u64,
+    pub submit_ns: u64,
+    pub decode_submit_ns: u64,
+    pub gpu_ready_ns: u64,
+    pub presented_ns: u64,
+    pub refresh_ns: u64,
+    pub sequence: u64,
+    pub flags: u64,
+    pub discarded: u64,
 }
 unsafe extern "C" {
     fn bridge_presentation_new(display: *mut c_void, surface: *mut c_void) -> *mut c_void;
@@ -44,7 +44,9 @@ impl Drop for Presentation {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iss_presentation_set_pacing(ptr: *mut c_void, enabled: c_int) {
-    unsafe { bridge_presentation_set_pacing(inner(ptr), enabled); }
+    unsafe {
+        bridge_presentation_set_pacing(inner(ptr), enabled);
+    }
 }
 unsafe fn inner(ptr: *mut c_void) -> *mut c_void {
     if ptr.is_null() {
